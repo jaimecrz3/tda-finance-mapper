@@ -41,7 +41,7 @@ tests/
 python -m venv .venv
 source .venv/bin/activate  # macOS/Linux
 pip install -r requirements.txt
-
+```
 ## Reproducibility
 - Random seeds are fixed where applicable.
 - Main outputs are exported to results/ (figures + CSV/JSON).
