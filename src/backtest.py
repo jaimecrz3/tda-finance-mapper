@@ -1,9 +1,38 @@
-from typing import Dict, Tuple
+from typing import Dict, Tuple, List, Optional, Union
 import numpy as np
 import pandas as pd
 
-# Importamos lo que construye clústeres (Mapper) y lo que convierte clústeres en pesos
-from tda_mapper import MapperParams, build_clusters_from_prices, weight_distribution
+# Mapper
+from tda_mapper import MapperParams, build_clusters_from_prices, weight_distribution, weight_distribution_portfolio
+
+# PH modules
+from tdapersistence import PHParams, compute_persistence_diagrams_from_returns
+from tdaphfeatures import ph_summary_features
+from tdaregime import RegimeController, bottleneck_distance_H1
+
+
+def mix_with_equal_weight(
+    w_tda: Dict[str, float],
+    universe: List[str],
+    alpha: float
+) -> Dict[str, float]:
+    """
+    Mezcla convexa: alpha * w_tda + (1-alpha) * w_eq
+    Garantiza pesos para todo el universo.
+    """
+    alpha = float(np.clip(alpha, 0.0, 1.0))
+    n = len(universe)
+    if n == 0:
+        return {}
+
+    w_eq = {s: 1.0 / n for s in universe}
+
+    w = {}
+    for s in universe:
+        w[s] = alpha * w_tda.get(s, 0.0) + (1.0 - alpha) * w_eq[s]
+
+    tot = sum(w.values())
+    return {s: v / tot for s, v in w.items()} if tot > 0 else w_eq
 
 
 # ============================================================
@@ -14,8 +43,13 @@ def backtest_tda(
     lookback_days: int,
     rebalance_days: int,
     params: MapperParams,
-    tc_bps: float = 0.0
-) -> pd.DataFrame: # Devolvemos un DataFrame
+    tc_bps: float = 0.0,
+    use_ph_control: bool = False,
+    ph_params: Optional[PHParams] = None,
+    regime_controller: Optional[RegimeController] = None,
+    ph_diagnostics_csv: Optional[str] = None,
+    periods_per_year: int = 252,
+) -> pd.DataFrame:
     """
     Backtest que simula una estrategia long-only:
       - Cada rebalance_days, recalcula clústeres usando los últimos lookback_days
@@ -39,6 +73,12 @@ def backtest_tda(
       y tc_bps = 5 bps(1 bp = 0.01% = 0.0001) el coste que se aplica:
       coste = turnover*(tc_bps/10000) = 1*(5/10000) = 0.05%
       Es decir, se descuenta 0.05% del valor del portfolio ese día.
+
+    Extensión (opcional): PH regime control
+      - Calcula PH en paralelo (sobre retornos) por ventana
+      - Score_t = bottleneck(H1_{t-1}, H1_t)
+      - Alpha_t = función online de score_t (sin look-ahead)
+      - Mezcla final: w = alpha_t*w_tda + (1-alpha_t)*w_eq
     """
 
     # 1) Ordenar fechas por si acaso
@@ -65,11 +105,43 @@ def backtest_tda(
     # 5) Series donde guardamos:
     # - port_ret: retorno diario de la estrategia
     # - turnover: turnover (aprox) solo el día que se aplica coste
+    # Nota: Usar series de pandas nos permite indexar por fecha
     port_ret = pd.Series(0.0, index=dates)
     turnover = pd.Series(0.0, index=dates)
 
+    # Extra: series para diagnosticar PH (se rellenan solo si use_ph_control=True)
+    regime_score = pd.Series(np.nan, index=dates)
+    alpha_series = pd.Series(np.nan, index=dates)
+
     # 6) Pesos anteriores (para calcular turnover frente al nuevo peso)
     w_prev: Dict[str, float] = {}
+
+    # ----------------------------
+    # Config PH por defecto
+    # ----------------------------
+    if ph_params is None:
+        ph_params = PHParams(
+            maxdim=1,
+            corr_method="pearson",
+            dist_variant="sqrt",
+            winsor_q=0.01
+        )
+
+    # Controlador de régimen calibrado a frecuencia de rebalance (no por días)
+    # reb_per_year ~ 252 / rebalance_days
+    if regime_controller is None:
+        reb_per_year = max(1.0, periods_per_year / float(rebalance_days))
+        history_len = max(10, int(round(5.0 * reb_per_year)))   # ~5 años de historia
+        min_history = max(4, int(round(2.0 * reb_per_year)))    # ~2 años mínimo
+        regime_controller = RegimeController(
+            history_len=history_len,
+            quantile=0.80,     # más estable con pocas observaciones
+            min_history=min_history,
+            min_alpha=0.25
+        )
+
+    prev_dgms = None
+    diagnostics_rows = []
 
     # ============================================================
     # Loop de rebalanceos
@@ -85,6 +157,7 @@ def backtest_tda(
         # .iloc[] selecciona filas por posición numérica (no por fecha).
         # Resultado: Una ventana con lookback_days + 1 filas
         window = prices.iloc[idx - lookback_days: idx + 1]
+        panel = list(window.columns)
 
         # 8) Construir clústeres via Mapper (devuelve estructura anidada o None)
         clusters = build_clusters_from_prices(window, params)
@@ -92,23 +165,98 @@ def backtest_tda(
         # 9) Convertir clústeres en pesos
         # Si falla el clustering, fallback: equal-weight en el panel disponible
         if not clusters:
-            cols = list(window.columns)
-            w = {c: 1.0 / len(cols) for c in cols}
+            w_tda = {c: 1.0 / len(panel) for c in panel} if len(panel) > 0 else {}
         else:
-            # weights sobre tickers 
-            w = weight_distribution(clusters)
+            # weights sobre tickers
+            #w_tda = weight_distribution(clusters)
+            w_tda = weight_distribution_portfolio(clusters, max_weight=0.06, gamma_giant=0.5, gamma_node=0.5, overlap_correction=False)
 
             # Seguridad: quedarnos solo con tickers realmente presentes en la ventana
-            panel_set = set(window.columns)
-            w = {s: float(v) for s, v in w.items() if s in panel_set and v > 0}
+            panel_set = set(panel)
+            w_tda = {s: float(v) for s, v in w_tda.items() if s in panel_set and v > 0.0}
 
             # Normalización por si algo quedó mal (suma distinta a 1 o vacío)
-            tot = sum(w.values())
+            tot = sum(w_tda.values())
             if tot <= 0:
-                cols = list(window.columns)
-                w = {c: 1.0 / len(cols) for c in cols}
+                w_tda = {c: 1.0 / len(panel) for c in panel} if len(panel) > 0 else {}
             else:
-                w = {s: v / tot for s, v in w.items()}
+                w_tda = {s: v / tot for s, v in w_tda.items()}
+
+        # ----------------------------
+        # PH control (opcional)
+        # ----------------------------
+        # 1. Cada ventana define una nube de activos en R^L con L = lookback_days y una distancia(correlación)
+        # 2. PH resume esa nube en diagramas Dt
+        # 3. Se compara Dt entre rebalanceos con bottleneck -> regime_score_H1
+        # 4. Ese score controla alpha_t, que regula el shrinkage a equal-weight
+        # Resumen: La aportacion de PH es detectar cuándo es más probable que la señal de clustering 
+        # sea menos estable y aplicar shrinkage para no pagar el coste (en riegos y/o turnover) 
+        # de una estructura frágil
+        score_t = None
+        alpha_t = 1.0
+
+        if use_ph_control and len(panel) > 0:
+            # returns_window: En vez de usar la misma ventana que mapper (750 días, unos 3 años),
+            # lo que hace que se suavize mucho los cambios, vamos a usar un año solo o medio año,
+            # para que PH actúe como "sensor de cambio reciente", mientras Mapper siga usando 
+            # una estructura de largo plazo
+            ph_lookback_days = round(lookback_days/3)
+            ph_window = prices.iloc[idx - ph_lookback_days : idx + 1]
+            returns_window = ph_window.pct_change().dropna(how="all")
+
+            ph_out = compute_persistence_diagrams_from_returns(returns_window, ph_params)
+            dgms = ph_out.get("dgms", [])
+            symbols_used = ph_out.get("symbols", [])
+
+            # score entre rebalanceos (solo si hay prev)
+            if prev_dgms is not None and len(dgms) > 1:
+                score_t = bottleneck_distance_H1(prev_dgms, dgms)
+
+            # alpha online SIN look-ahead (threshold basado en scores pasados)
+            alpha_t = regime_controller.alpha_from_score(score_t)
+
+            # actualizar historia después de usar score_t
+            regime_controller.update_history(score_t)
+            prev_dgms = dgms
+
+            # features para logging
+            feats = ph_summary_features(dgms) if dgms else {}
+            diagnostics_rows.append({
+                "rebalance_date": dates[idx],
+                "n_assets_panel": len(panel),
+                "n_assets_used_ph": len(symbols_used),
+                "regime_score_H1": score_t if score_t is not None else np.nan,
+                "alpha_t": alpha_t,
+                **feats
+            })
+
+        # Mezcla final (si no hay PH, alpha=1 => w = w_tda)
+        w = mix_with_equal_weight(w_tda, panel, alpha=alpha_t) if len(panel) > 0 else {}
+
+        # Normalización defensiva
+        tot = sum(w.values())
+        if tot <= 0 and len(panel) > 0:
+            w = {c: 1.0 / len(panel) for c in panel}
+        elif tot > 0:
+            w = {s: v / tot for s, v in w.items()}
+
+        covered_by_tda = [s for s in panel if w_tda.get(s, 0.0) > 0.0]
+        coverage = len(covered_by_tda) / max(1, len(panel))
+
+        # Shrinkage por cobertura: si Mapper deja fuera activos, reduces confianza en w_tda
+        alpha_cov = float(np.clip(coverage, 0.0, 1.0))
+
+        # Si NO usas PH: alpha_final = alpha_cov
+        # Si usas PH: puedes combinar ambos (multiplicar) para que PH también reduzca riesgo
+        alpha_final = alpha_t * alpha_cov if use_ph_control else alpha_cov
+
+        w = mix_with_equal_weight(w_tda, panel, alpha=alpha_final)
+
+        # Diagnóstico: distancia a equal-weight
+        w_eq = {s: 1.0 / len(panel) for s in panel}
+        l1 = sum(abs(w_tda.get(s, 0.0) - w_eq[s]) for s in panel)
+        wvals = np.array([w_tda.get(s, 0.0) for s in panel])
+        print(f"[{dates[idx].date()}] L1_to_eq={l1:.6f}  min={wvals.min():.6f}  max={wvals.max():.6f}  std={wvals.std():.6f}")
 
         # ============================================================
         # 10) Turnover aproximado
@@ -123,10 +271,7 @@ def backtest_tda(
         # to = 1.0 -> 100% de rotación
         # to >1.0 -> Rotación múltiple (muy agresiva)
         keys = set(w_prev) | set(w) #union de activos de ambas carteras
-        to = 0.5 * sum(
-            abs(w.get(a, 0.0) - w_prev.get(a, 0.0)) 
-            for a in keys
-        )
+        to = 0.5 * sum(abs(w.get(a, 0.0) - w_prev.get(a, 0.0)) for a in keys)
 
         # ============================================================
         # 11) Definir tramo en el que estos pesos se aplican
@@ -169,6 +314,11 @@ def backtest_tda(
             # Guardamos el retorno del dia d
             port_ret.loc[d] = r
 
+            # rellenar diagnóstico por día (constante en el tramo)
+            if use_ph_control:
+                regime_score.loc[d] = (score_t if score_t is not None else np.nan)
+                alpha_series.loc[d] = alpha_t
+
         # 14) Guardamos pesos actuales como “anteriores” para el próximo rebalance
         w_prev = dict(w)
 
@@ -176,7 +326,21 @@ def backtest_tda(
     nav = (1.0 + port_ret).cumprod()
 
     # 16) Devolvemos DataFrame con retorno, nav y turnover
-    return pd.DataFrame({"port_ret": port_ret, "port_nav": nav, "turnover": turnover})
+    out = pd.DataFrame({
+        "port_ret": port_ret,
+        "port_nav": nav,
+        "turnover": turnover
+    })
+
+    if use_ph_control:
+        out["regime_score_H1"] = regime_score
+        out["alpha_t"] = alpha_series
+
+    # Guardar CSV de diagnósticos por rebalance si se pide
+    if ph_diagnostics_csv is not None and len(diagnostics_rows) > 0:
+        pd.DataFrame(diagnostics_rows).to_csv(ph_diagnostics_csv, index=False)
+
+    return out
 
 
 # ============================================================
@@ -205,49 +369,269 @@ def backtest_equal_weight(prices: pd.DataFrame) -> pd.DataFrame:
 
 
 # ============================================================
-# 3) MÉTRICAS: retorno anualizado, vol anualizada, Sharpe y max drawdown
+# 3) MÉTRICAS
 # ============================================================
-def perf_summary(port_ret: pd.Series, trading_days: int = 252) -> Dict[str, float]:
+def perf_summary(
+    port_ret: pd.Series,
+    periods_per_year: int = 252,
+    rf: Optional[Union[float, pd.Series]] = 0.0, 
+    mar: float = 0.0,
+    var_levels: Tuple[float, ...] = (0.95, 0.99),
+    market_ret: Optional[pd.Series] = None,
+    factors: Optional[pd.DataFrame] = None,
+) -> Dict[str, float]:
     """
-    Calcula métricas típicas:
-      - ann_return: retorno anualizado
-      - ann_vol: volatilidad anualizada
-      - sharpe: (ann_return / ann_vol) sin risk-free
-      - max_drawdown: drawdown mínimo (negativo)
+    Panel ampliado de métricas de performance.
 
-    trading_days=252: aproximación típica para días de mercado en un año.
+    Parámetros
+    ----------
+    port_ret : pd.Series
+        Retornos del portfolio (en decimales, p.ej. 0.01 = +1%).
+    periods_per_year : int
+        Frecuencia de anualización (252 diario, 12 mensual, etc.).
+    rf : float o pd.Series
+        Risk-free en la misma frecuencia que port_ret (en decimales). Si es float, se asume constante.
+    mar : float
+        Minimum Acceptable Return para Sortino, en la MISMA frecuencia que port_ret
+        (por defecto 0.0). Si quieres MAR anual, usa mar_annual / periods_per_year.
+    var_levels : tuple
+        Niveles de confianza para VaR/ES, p.ej. (0.95, 0.99).
+    market_ret : pd.Series, opcional
+        Retorno del mercado (misma frecuencia) para CAPM alpha/beta.
+        CAPM(Capital Asset Pricing Model) es un modelo matemático qu estima el retorno
+        esperado de una inversión basado en su riesgo relativo al resto del mercado
+    factors : pd.DataFrame, opcional
+        DataFrame de factores (misma frecuencia). Formatos soportados:
+          - Columnas tipo Ken French: ["Mkt-RF","SMB","HML","RMW","CMA"] y opcional "RF"
+          - Si existe "RF" aquí y rf se deja a 0.0/None, se usará este RF.
+
+        Importante: asegúrate de que los factores estén en decimales (no en %).
     """
-    r = port_ret.dropna()
+    import numpy as _np
+    import pandas as _pd
+
+    r = port_ret.dropna().copy()
     if len(r) == 0:
         return {}
 
-    # Retorno anualizado geométrico:
-    # (1+R_total)^(252/N) - 1
-    ann_ret = (1.0 + r).prod() ** (trading_days / len(r)) - 1.0
+    # 1) Retornos: aritmético vs geométrico
+    n = len(r)
+    total_return = (1.0 + r).prod() - 1.0
+    geo_mean_period = (1.0 + r).prod() ** (1.0 / n) - 1.0
+    arith_mean_period = float(r.mean())
 
-    # Vol anualizada:
-    # std diaria * sqrt(252)
-    ann_vol = r.std(ddof=0) * np.sqrt(trading_days)
+    ann_return_geo = (1.0 + r).prod() ** (periods_per_year / n) - 1.0
+    ann_return_arith = arith_mean_period * periods_per_year
 
-    # Sharpe simplificado (sin rf)
-    sharpe = ann_ret / ann_vol if ann_vol > 0 else np.nan
+    # 2) Riesgo
+    vol_period = float(r.std(ddof=0))
+    ann_vol = vol_period * _np.sqrt(periods_per_year)
 
-    # NAV y drawdown
+    # 3) Excess returns
+    if rf is None:
+        rf_series = _pd.Series(0.0, index=r.index)
+    elif isinstance(rf, (int, float, _np.floating)):
+        rf_series = _pd.Series(float(rf), index=r.index)
+    else:
+        rf_series = _pd.Series(rf).reindex(r.index)
+
+    if factors is not None and "RF" in factors.columns:
+        if rf is None or (isinstance(rf, (int, float, _np.floating)) and float(rf) == 0.0):
+            rf_series = _pd.Series(factors["RF"]).reindex(r.index)
+
+    excess = (r - rf_series).dropna()
+
+    # 4) Sharpe (canónico)
+    ex_std = float(excess.std(ddof=0))
+    sharpe = _np.sqrt(periods_per_year) * float(excess.mean()) / ex_std if ex_std > 0 else _np.nan
+
+    # 5) Sortino
+    mar_series = _pd.Series(float(mar), index=excess.index)
+    downside = (excess - mar_series).copy()
+    downside[downside > 0] = 0.0
+    downside_dev = float(_np.sqrt((downside ** 2).mean()))
+    sortino = _np.sqrt(periods_per_year) * float((excess - mar_series).mean()) / downside_dev if downside_dev > 0 else _np.nan
+
+    # 6) NAV, HWM, Drawdown, duración, Calmar
     nav = (1.0 + r).cumprod()
-    dd = nav / nav.cummax() - 1.0
-    max_dd = dd.min()
+    hwm_nav = float(nav.cummax().max())
+    hwm_return = float(hwm_nav - 1.0)
 
-    return {
-        "ann_return": float(ann_ret),
+    dd = nav / nav.cummax() - 1.0
+    max_dd = float(dd.min())  # negativo
+
+    in_dd = nav < nav.cummax()
+    max_dd_duration = 0
+    cur = 0
+    for v in in_dd.values:
+        if v:
+            cur += 1
+            max_dd_duration = max(max_dd_duration, cur)
+        else:
+            cur = 0
+
+    calmar = float(ann_return_geo / abs(max_dd)) if max_dd < 0 else _np.nan
+
+    # 7) VaR/ES históricos
+    var_es = {}
+    for lvl in var_levels:
+        a = 1.0 - float(lvl)
+        q = float(r.quantile(a))
+        es = float(r[r <= q].mean()) if (r <= q).any() else _np.nan
+        var_es[f"VaR_{int(lvl*100)}"] = q
+        var_es[f"ES_{int(lvl*100)}"] = es
+
+    # 8) Momentos
+    skew = float(r.skew()) if n > 2 else _np.nan
+    kurt = float(r.kurtosis()) if n > 3 else _np.nan
+
+    # 9) Regressions: CAPM y FF5
+    capm_stats = {}
+    ff5_stats = {}
+
+    try:
+        import statsmodels.api as sm  # type: ignore
+    except Exception:
+        sm = None
+
+    if sm is not None and market_ret is not None:
+        mkt = _pd.Series(market_ret).reindex(r.index).dropna()
+        idx = excess.index.intersection(mkt.index)
+        y = excess.reindex(idx).dropna()
+        x_mkt_ex = (mkt.reindex(idx) - rf_series.reindex(idx)).dropna()
+
+        idx2 = y.index.intersection(x_mkt_ex.index)
+        y = y.reindex(idx2)
+        x_mkt_ex = x_mkt_ex.reindex(idx2)
+
+        if len(y) >= 20 and x_mkt_ex.std(ddof=0) > 0:
+            X = sm.add_constant(x_mkt_ex.values)
+            model = sm.OLS(y.values, X).fit()
+            alpha = float(model.params[0])
+            beta = float(model.params[1])
+            capm_stats = {
+                "capm_alpha_period": alpha,
+                "capm_alpha_ann": alpha * periods_per_year,
+                "capm_alpha_tstat": float(model.tvalues[0]),
+                "capm_beta": beta,
+                "capm_beta_tstat": float(model.tvalues[1]),
+                "capm_r2": float(model.rsquared),
+                "capm_nobs": float(model.nobs),
+            }
+
+    if sm is not None and factors is not None:
+        f = factors.copy()
+        cols = []
+        if "Mkt-RF" in f.columns: cols.append("Mkt-RF")
+        if "SMB" in f.columns: cols.append("SMB")
+        if "HML" in f.columns: cols.append("HML")
+        if "RMW" in f.columns: cols.append("RMW")
+        if "CMA" in f.columns: cols.append("CMA")
+
+        if len(cols) >= 1:
+            f = f[cols].reindex(r.index)
+            idx = excess.index.intersection(f.dropna().index)
+            y = excess.reindex(idx).dropna()
+            Xdf = f.reindex(idx).dropna()
+
+            idx2 = y.index.intersection(Xdf.index)
+            y = y.reindex(idx2)
+            Xdf = Xdf.reindex(idx2)
+
+            if len(y) >= (len(cols) + 20):
+                X = sm.add_constant(Xdf.values)
+                model = sm.OLS(y.values, X).fit()
+                alpha = float(model.params[0])
+                ff5_stats = {
+                    "ff_alpha_period": alpha,
+                    "ff_alpha_ann": alpha * periods_per_year,
+                    "ff_alpha_tstat": float(model.tvalues[0]),
+                    "ff_r2": float(model.rsquared),
+                    "ff_nobs": float(model.nobs),
+                }
+                for j, c in enumerate(cols, start=1):
+                    ff5_stats[f"ff_beta_{c}"] = float(model.params[j])
+                    ff5_stats[f"ff_tstat_{c}"] = float(model.tvalues[j])
+
+    out = {
+        "n_periods": float(n),
+        "total_return": float(total_return),
+
+        "geo_mean_period": float(geo_mean_period),
+        "arith_mean_period": float(arith_mean_period),
+
+        "ann_return_geo": float(ann_return_geo),
+        "ann_return_arith": float(ann_return_arith),
+
+        "ann_return": float(ann_return_geo),  # compat
         "ann_vol": float(ann_vol),
+
         "sharpe": float(sharpe),
-        "max_drawdown": float(max_dd)
+        "sortino": float(sortino),
+
+        "hwm_nav": float(hwm_nav),
+        "hwm_return": float(hwm_return),
+
+        "max_drawdown": float(max_dd),
+        "max_drawdown_duration": float(max_dd_duration),
+
+        "calmar": float(calmar),
+
+        "skew": float(skew),
+        "kurtosis": float(kurt),
     }
+    out.update(var_es)
+    out.update(capm_stats)
+    out.update(ff5_stats)
+    return out
+
 
 
 # ============================================================
 # 4) BASELINE JUSTO: equal-weight + rebalance periódico + mismos costes
 # ============================================================
+"""
+Este baseline sigue sin ser correcto del todo, ¿Qué ocurre en el mundo real?
+
+En la práctica, incluso si no realizas operaciones, los pesos de una
+cartera cambian debido a los retornos de los activos.
+
+Si en el día t tienes pesos w_t y al día siguiente los activos obtienen
+retornos r_{t+1,i}, los pesos "drifteados" antes de reequilibrar son:
+
+    w~_{t+1,i} = w_{t,i} (1 + r_{t+1,i})
+                ---------------------------------
+                sum_j w_{t,j} (1 + r_{t+1,j})
+
+Estos pesos reflejan la evolución natural de la cartera sin trading.
+
+--------------------------------------------------
+Turnover correcto en un rebalanceo
+--------------------------------------------------
+
+Al reequilibrar, el turnover debe medirse como la distancia entre:
+
+- Pesos actuales drifted: w~
+- Pesos objetivo:         w*
+
+Definición estándar:
+
+    turnover = 0.5 * sum_i | w*_i - w~_i |
+
+El factor 0.5 hace que pasar de 100% en A a 100% en B implique turnover = 1
+(100% del capital rotado).
+
+--------------------------------------------------
+Implicación importante
+--------------------------------------------------
+
+Incluso una estrategia equal-weight tiene turnover > 0, aunque los pesos
+objetivo w* sean siempre los mismos, porque los pesos reales w~ cambian
+cada día debido a los retornos.
+
+Por tanto, ignorar el drift de pesos subestima sistemáticamente el
+turnover y los costes de transacción.
+"""
 def backtest_equal_weight_rebalanced(
     prices: pd.DataFrame,
     lookback_days: int,
@@ -280,14 +664,11 @@ def backtest_equal_weight_rebalanced(
         window = prices.iloc[idx - lookback_days: idx + 1]
         cols = list(window.columns)
 
-        # Pesos equal-weight en el panel disponible
-        w = {c: 1.0 / len(cols) for c in cols}
+        w = {c: 1.0 / len(cols) for c in cols} if len(cols) > 0 else {}
 
-        # Turnover vs pesos previos
         keys = set(w_prev) | set(w)
         to = 0.5 * sum(abs(w.get(a, 0.0) - w_prev.get(a, 0.0)) for a in keys)
 
-        # Tramo hasta el siguiente rebalance
         end_idx = rebalance_idx[k + 1] if k + 1 < len(rebalance_idx) else (len(dates) - 1)
         hold_dates = dates[idx + 1: end_idx + 1]
 

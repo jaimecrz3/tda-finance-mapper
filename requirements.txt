@@ -6,4 +6,7 @@ kmapper
 networkx
 matplotlib
 pyarrow
+ripser
+persim
+pandas_datareader
 

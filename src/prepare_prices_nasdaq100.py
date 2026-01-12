@@ -4,7 +4,7 @@ import pandas as pd
 IN_PATH = "data/NASDAQ_100_Data_From_2010_To_2021.csv"
 
 # Ruta de salida: guardaremos un archivo Parquet (más rápido y compacto que CSV)
-OUT_PATH = "data/prices_adjclose.parquet"
+OUT_PATH = "data/prices_nasdaq100_adjclose.parquet"
 
 
 def main():
