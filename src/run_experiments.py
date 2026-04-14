@@ -9,10 +9,11 @@ from backtest import (
     backtest_equal_weight_rebalanced
 )
 
-from prepare_prices_49_industry_portfolios import load_kf49_prices
 from prepare_prices_49_IP_datareader import load_kf49_prices_from_returns
 
 
+# Este archivo pone a prueba si agrupar activos finacieros usando TDA genera mejores retornos
+# que estrategias de inversion mas simples
 def main():
     use_data_nasdaq = False
     use_data_49_IP = True
@@ -24,23 +25,39 @@ def main():
         # 1. parsear el bloque “Average Value Weighted Returns -- Monthly” (o el equal-weighted),
         # 2. limpiar missings (-99.99/-999),
         # 3. convertir retornos -> índice de precios sintético por capitalización compuesta.
-        rets = pd.read_csv(
+        rets = pd.read_csv( # Lo convertimos a data frame
             "data/49_industries_portfolios_monthly.csv",
-            index_col=0,
-            parse_dates=True
+            index_col=0, # Indicamos que la columna que vamos a usar como indice es la 0, que es en la que vienen las fechas
+            parse_dates=True # Parseamos index_col como un Datatimeindex, necesario para hacer time series analysis
         )
 
-        # Asegura índice a fin de mes (coherente con intervalos y slicing)
+        # Asegura índice a fin de mes
+        # pd.to_datetime(rets.index) toma el índice original: 197001 y lo traduce a un objeto de fecha de Pandas: 1970-01-01
+        # .to_period("M") toma esa fecha exacta (1970-01-01) y lo convierte a un PeriodIndex Ahora la fecha no es un día concreto, sino que representa conceptualmente a "Todo enero de 1970"
+        # .to_timestamp("M") vuelve a convertir en un DatatimeIndex, al pasarle la letra "M" (que en Pandas significa Month-end), empuja la fecha al último día del mes.
+        # Resultado: El índice se convierte en 1970-01-31
         rets.index = pd.to_datetime(rets.index).to_period("M").to_timestamp("M")
 
+        # A partir de los retornos generados, obtenemos los precios
         prices = load_kf49_prices_from_returns(
             rets=rets,
             require_complete_panel=True
         ).sort_index()
 
-        # ------------------------------------------------------------
         # Factores Ken French (mensual): RF y Market Return
-        # ------------------------------------------------------------
+        # Este archivo contiene el Modelo de 3 Factores de Fama y French
+        # Cada fila es un mes, y los valores están en formato decimal (por ejemplo, 0.05 es un 5% de retorno en ese mes). Las columnas son:
+        # RF (Risk-Free Rate): Es el retorno que habrías obtenido si hubieras dejado tu dinero en el activo más seguro del mundo ese mes (usualmente Bonos del Tesoro de EE. UU. a un mes). 
+        # Si tu estrategia de inversión no supera a esta columna, mejor dejas el dinero en el banco.
+        # Mkt-RF (Market Risk Premium): Es el retorno total de toda la bolsa de valores junta, restándole la tasa libre de riesgo (RF). 
+        # Responde a la pregunta: "¿Cuánto pagó la bolsa este mes por asumir el riesgo de invertir en acciones en lugar de dejar el dinero seguro?"
+        # SMB (Small Minus Big): Mide el rendimiento de las empresas de pequeña capitalización (Small Caps) frente a las gigantes (Large Caps). Si el número es positivo, significa que a las
+        # empresas pequeñas les fue mejor que a las grandes ese mes.
+        # HML (High Minus Low): Mide el rendimiento de las empresas "Value" (compañia cuyo valor bursatil es menor que su valor intrinseco) frente a las empresas "Growth".
+        # 
+        # Este archivo nos sirve para calcular el Alpha y el Beta de tu estrategia. Se cruza la rentabilidad del portafolio con estos 3 factores para responder a:
+        # ¿Ese 15% de ganancia se debe a que el algoritmo topológico es brillante (Alpha), o simplemente tuviste suerte porque durante esa década la bolsa en general subió muchísimo (Mkt-RF) y las empresas pequeñas estaban de moda (SMB)?
+        # Sin este archivo solo se sabria el dinero ganado pero no el por qué.
         ff3 = pd.read_csv(
             "data/ff3_monthly.csv",
             index_col=0,
@@ -53,7 +70,9 @@ def main():
         rf = ff3["RF"]            # monthly risk-free (decimals)
         mkt = ff3["Mkt-RF"] + rf  # market TOTAL return (decimals)
 
-        # Alinear por índice mensual común
+        # Toma la lista de fechas de los precios (prices), la cruza con las fechas de la tasa libre de riesgo (rf) y 
+        # la vuelve a cruzar con las fechas del mercado (mkt). El resultado (common) es una nueva lista maestra de fechas que 
+        # solo incluye los meses que existen simultáneamente en los tres archivos.
         common = prices.index.intersection(rf.index).intersection(mkt.index)
         prices = prices.loc[common]
         rf = rf.loc[common]
@@ -103,7 +122,17 @@ def main():
 
             # activar HACA:
             clusterer="haca",
-            haca_distance_threshold=0.7,
+            # Es el umbral de distancia que determina hasta que punto dos clusters
+            # pueden unirse. Si la distancia entre los dos clusters es mayor que
+            # este umbral, no se unirán. Si es menor se consideraran suficiente
+            # similares para fusionarse.
+            # 
+            # Un valor bajo da lugar a clusters más pequeños y específicos.
+            # un valor alto da lugar a clusters más grandes y generales .
+            haca_distance_threshold=0.6,
+            # El método linkage define como se calcula la distancia entre dos clusters.
+            # Con average, la distancia entre dos clusters es la media de todas las 
+            # distancias entre cada punto de un cluster y cada punto del otro.
             haca_linkage="average",
         )
     else:
@@ -118,12 +147,11 @@ def main():
         ]
     elif use_data_49_IP:
         intervals = [
-            ("1970-01-31", "1979-12-31"),
-            ("1980-01-31", "1989-12-31"),
-            ("1990-01-31", "1999-12-31"),
-            ("2000-01-31", "2009-12-31"),
-            ("2010-01-31", "2019-12-31"),
-            ("2020-01-31", "2025-11-30"), 
+            ("1975-01-31", "1984-12-31"), # Era de hiperinflación y subidas de tipos de interés extremas de Paul Volcker
+            ("1985-01-31", "1994-12-31"),
+            ("1995-01-31", "2004-12-31"), # la burbuja de las Punto Com (2000)
+            ("2005-01-31", "2014-12-31"), # Gran Crisis Financiera de 2008
+            ("2015-01-31", "2025-11-30"), # Covid-19
         ]
     else:
         raise ValueError("Se debe incluir un dataset")
@@ -217,19 +245,27 @@ def main():
             })
     elif use_data_49_IP:
         for a, b in intervals:
-            # Opcional: llevar a fin de mes por seguridad
-            start = pd.Timestamp(a) + pd.offsets.MonthEnd(0)
-            end = pd.Timestamp(b) + pd.offsets.MonthEnd(0)
+            # Tomamos el texto de la lista de intervalos y lo convertimos en una fecha real que Python entiende.
+            start = pd.Timestamp(a) 
+            end = pd.Timestamp(b) 
 
-            # CAMBIO: warm-up mensual (no BDay)
+            # Para saber en que invertir en una fecha, necesitamos informacion previa.
+            # Aqui retrocedemos lookback_days + 1 desde la fecha de inicio.
+            # Por ejemplo, si lookback_days = 60, retrocedemos 5 años mas un mes de seguridad
             warm_start = start - pd.offsets.MonthEnd(lookback_days + 1)
 
+            # Tomamos la table de precios y nos quedamos con el periodo que va desde el inicio del calentamiento hasta el final de la década
+            # Eliminamos todas las columnas (industrias) que tengan algun valor nulo
             sub = prices.loc[warm_start:end].dropna(axis=1, how="any")
 
-            # CAMBIO: el umbral "+50" ya no tiene sentido mensual; usa algo tipo +6/+12
+            # sub.shape[0] es el número de filas (meses).
+            # sub.shape[1] es el número de columnas (industrias/activos).
+            # Si los meses disponibles son menores a los necesarios para el calentamiento MÁS un año de operativa real (12 meses) ignoramos este periodo
+            # Si después de limpiar los activos defectuosos nos quedamos con menos de 10 industrias para invertir ignoramos este periodo.
             if sub.shape[0] < lookback_days + 12 or sub.shape[1] < 10:
                 continue
 
+            # SIMULAMOS LAS ESTRATEGIAS DE INVERSION (sobre el periodo completo, incluyendo el calentamiento)
             tda_mapper_full = backtest_tda(
                 sub, lookback_days, rebalance_days, params, tc_bps=5.0,
                 use_ph_control=False, periods_per_year=12
@@ -245,21 +281,27 @@ def main():
             eqw_reb_full = backtest_equal_weight_rebalanced(
                 sub, lookback_days, rebalance_days, tc_bps=5.0
             )
-
+            
+            # Tomamos los resultados de los backtests y quitamos el periodo de calentamiento
             tda_mapper = tda_mapper_full.loc[start:end]
             tda_ph = tda_ph_full.loc[start:end]
             eqw = eqw_full.loc[start:end]
             eqw_reb = eqw_reb_full.loc[start:end]
 
+            # COMPROBACION (luego se quitara)
+            # Resta mes a mes los rendimientos de la estrategia TDA Mapper ylos de Equal Weight Rebalanced
+            # Si la diferencia máxima es 0.000000, significa que el modelo complejo de Topología está haciendo exactamente 
+            # lo mismo que la estrategia tonta.
             diff = (tda_mapper["port_ret"] - eqw_reb["port_ret"]).abs()
             print("Max abs daily diff:", diff.max())
             print("Mean abs daily diff:", diff.mean())
 
-            # Factores (RF y mercado) alineados al tramo evaluado
+            # quitamos el periodo de calentamiento de los factores (RF y mercado)
             rf_win = rf.loc[start:end]
             mkt_win = mkt.loc[start:end]
             ff3_win = ff3.loc[start:end]
 
+            # Obtenems las metricas para cada algoritmo
             rows.append({
                 "start": a, "end": b,
                 "tda_mapper": perf_summary(tda_mapper["port_ret"], periods_per_year=periods_per_year, rf=rf_win, market_ret=mkt_win, factors=ff3_win),
@@ -272,15 +314,17 @@ def main():
                 "final_nav_eqw_reb": float(eqw_reb["port_nav"].iloc[-1]),
             })
 
-            def _g(d: dict, k: str, default=np.nan):
-                return d.get(k, default)
-
-            last = rows[-1]
+            last = rows[-1] # Ultimo periodo analizado
 
             tda = last["tda_mapper"]
             ph  = last["tda_ph"]
             eqw = last["eqw"]
             eqr = last["eqw_reb"]
+
+            # Funcion para extraer los resultados del último periodo analizado (rows[-1]) para luego pasarlos a las columnas del Excel final
+            # Si algun dato no existe, lo pone como nan(not a number) 
+            def _g(d: dict, k: str, default=np.nan):
+                return d.get(k, default)
 
             out_rows.append({
                 "start": a, "end": b,
@@ -393,7 +437,7 @@ def main():
         summary.to_csv("results_Nasdaq100/prueba_results_summary_mapper_vs_ph_control.csv", index=False)
     elif use_data_49_IP:
         summary.to_csv(
-            "results_49_Industry_Portfolios/results_haca_summary_mapper_vs_ph_control.csv", index=False)
+            "results_49_Industry_Portfolios/results_haca_landscape_summary_mapper_vs_ph_control.csv", index=False)
     else:
         raise ValueError("Se debe incluir un dataset")
     

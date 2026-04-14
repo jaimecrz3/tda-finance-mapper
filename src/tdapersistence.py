@@ -8,6 +8,13 @@ import pandas as pd
 
 
 """
+Remarkable property -> Una propiedad importante que hace la homología persistente
+adecuada para analizar datos con ruido es su robustez ante pequeñas perturbaciones. 
+De manera informal, esta propiedad dice que si la nube de puntos subyacente cambia un 
+"poco", entonces el correspondiente diagrama de persistencia se meve solo un "poco" 
+respecto a la Wesserstein distance. Fuente: D. Chen-Steiner, et. al. Stability of 
+persistance diagrams, Discrete and Computational Geometry 37 (2007) 103.
+
 1) Se parte de:
 
 - Un conjunto de puntos X_t = {x_1, ..., x_N} (activos).

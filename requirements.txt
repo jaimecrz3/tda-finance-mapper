@@ -9,4 +9,5 @@ pyarrow
 ripser
 persim
 pandas_datareader
+gudhi
 

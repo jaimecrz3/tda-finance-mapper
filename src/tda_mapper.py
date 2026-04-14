@@ -17,9 +17,8 @@ from sklearn.base import BaseEstimator, ClusterMixin
 from umap import UMAP
 
 
-# -------------------------------------------------------------------
-# 1) Parámetros del "pipeline" de TDA (Mapper)
-# -------------------------------------------------------------------
+
+# 1) Parámetros 
 @dataclass(frozen=True)
 class MapperParams:
     """
@@ -48,8 +47,10 @@ class MapperParams:
     dbscan_min_samples: int = 2
 
     # Selección del algoritmo de clustering local en cada celda del cover.
-    # - "dbscan": puede marcar puntos como ruido (-1) => tickers "missing"
+    # - "dbscan": si encuentra un punto (un activo financiero) que está muy lejos de los demás, lo toma como ruido y le pone una etiqueta de -1 (lo descarta)
+    #               Si por ej el algoritmo descarta a Apple porque se mueve distinto al resto, estariamos quitando una empresa muy importante
     # - "haca": hierarchical agglomerative clustering (sin "ruido") sobre distancia de correlación (1 - corr)
+    #           Nunca descarta a nadie, si un activo es muy raro, lo pone en un cluster solitario
     clusterer: str = "dbscan"
 
     # HACA: umbral de distancia (1 - corr). Valores típicos: 0.3–1.0
@@ -59,9 +60,13 @@ class MapperParams:
     min_assets: int = 5
 
 
-# -------------------------------------------------------------------
 # 1.1) Clusterer alternativo: HACA (Agglomerative) sobre distancia de correlación
-# -------------------------------------------------------------------
+# Necesitamos hacerlo porque KeplerMapper solo acepta algoritmos que tengan la estructura oficial de scikit-learn, con metodos como fit. 
+# Al heredar de BaseEstimator, heredamos esos métodos automáticamente y Mapper la acepta.
+# Haca entiende de distancias no de correlaciones:
+# Si dos activos se mueven exactamente igual (Correlación = 1), la distancia es 1 - 1 = 0 (son el mismo punto).
+# Si no tienen nada que ver (Correlación = 0), la distancia es 1 - 0 = 1 (Están lejos).
+# Si se mueven exactamente al revés (Correlación = -1), la distancia es 1 - (-1) = 2 (están en polos opuestos).
 class HACAClusterer(BaseEstimator, ClusterMixin):
     """
     Wrapper Agglomerative para KeplerMapper con distancia de correlación.
@@ -93,6 +98,7 @@ class HACAClusterer(BaseEstimator, ClusterMixin):
         corr = np.clip(corr, -1.0, 1.0)
 
         dist = 1.0 - corr
+        # garantizar que la distancia de un activo consigo mismo sea siempre un cero
         np.fill_diagonal(dist, 0.0)
 
         # Compatibilidad sklearn (metric vs affinity)
@@ -114,17 +120,16 @@ class HACAClusterer(BaseEstimator, ClusterMixin):
 
         return model.fit_predict(dist)
 
-# -------------------------------------------------------------------
+
 # 2) Construcción de clusters vía Mapper a partir de precios
-# -------------------------------------------------------------------
 def build_clusters_from_prices(
     prices_window: pd.DataFrame, #informativo, no impone el tipo en tiempo de ejecución
     params: MapperParams
-) -> Optional[List[List[List[str]]]]: #Tipo de retorno, optional significa que puededevover None
+) -> Optional[List[List[List[str]]]]: #Tipo de retorno, optional significa que puede devolver None
     """
     Entrada:
       prices_window: DataFrame con index=fechas y columnas=tickers; valores=precios (idealmente Adj Close).
-        Nota: El adjusted close es una versió modifcada del precio de cierre de una ación que tiene en cuenta 
+        Nota: El adjusted close es una versión modifcada del precio de cierre de una ación que tiene en cuenta 
         acciones corporativas como splits e acciones, dividendos y emisiones de derechos.  
       params: hiperparámetros del pipeline.
 
@@ -150,26 +155,23 @@ def build_clusters_from_prices(
       - Las "giant clusters" aquí son componentes conexas del grafo de nodos.
     """
 
-    # ---------------------------------------------------------------
-    # 2.1) Preparación de datos: ordenar y rellenar hacia delante
-    # ---------------------------------------------------------------
+    # 2.1) Preparación de datos: ordenar con sort_index y rellenar hacia delante con
     # ffill: rellena NaNs usando el último valor conocido hacia adelante.
-    # Importante: NO usamos bfill (relleno hacia atrás) para no "usar" valores futuros
+    # Importante: NO usamos bfill (relleno hacia atrás) para no "usar" valores futuros (Data Leakage)
     # en periodos anteriores (aunque sea solo imputación, metodológicamente es mejor evitarlo).
     #
     # dropna(axis=1, how="any"): elimina tickers que tengan algún NaN residual en la ventana.
     # Esto fuerza que todos los activos usados tengan serie completa para el periodo.
-    
     prices = prices_window.sort_index().ffill().dropna(axis=1, how="any")
     #prices = prices_window.sort_index().ffill()
 
+    # prices.shape[1] es el numero de columnas (activos)
     # Si quedan muy pocos activos, no intentamos clusterizar
     if prices.shape[1] < params.min_assets:
         return None
 
-    # ---------------------------------------------------------------
+    
     # 2.2) Pasar de precios a retornos (log-returns)
-    # ---------------------------------------------------------------
     # log_returns(t) = log(P_t / P_{t-1})
     # - reduce efecto de escala (una acción de 20$ y otra de 2000$)
     # - para correlación es más natural usar retornos que precios
@@ -181,16 +183,17 @@ def build_clusters_from_prices(
 
     # Transponemos para que cada fila sea un ticker (un "punto" en Mapper)
     # y cada columna sea el tiempo (features).
-    # Luego lo que hacemos es tratar caa ticker como un "punto" con muchas
+    # Luego lo que hacemos es tratar cada ticker como un "punto" con muchas
     # features(los retornos a lo largo del tiempo)
     log_returns = log_ret_t.T  # filas=tickers, columnas=tiempo
 
+    # Si quedan muy pocos activos, no intentamos clusterizar
     if log_returns.shape[0] < params.min_assets:
         return None
 
-    # ---------------------------------------------------------------
+    
     # 2.3) Lens / proyección: PCA -> UMAP
-    # ---------------------------------------------------------------
+    #
     # KeplerMapper trabaja así:
     #   1) proyecta cada punto a un espacio (lens)
     #   2) crea un cover sobre ese lens (intervalos/celdas con solapamiento)
@@ -203,27 +206,24 @@ def build_clusters_from_prices(
     # Cada fila = ticker, columnas = tiempo.
     # Normalizamos por fila(z-score por fila) que elimina el efecto de escala/volatilidad: 
     # sin ella, PCA/UMAP tienden a separar activos “por volatilidad” más que por patrón de co-movimiento.
-    # Si no estandarizas: Un ticker con volatilidad alta domina las distancias y controla los ejes principales
-    # Ejemplo conceptual:
-    # Ticker	Volatilidad	Comportamiento
-    # AAPL	    baja	    sube con mercado
-    # MSFT	    baja	    sube con mercado
-    # TSLA	    muy alta	caótico
-    # Sin estandarizar: PCA eje 1 ≈ “TSLA vs resto” y UMAP separa TSLA como outlier
-    # Después del z-score por fila: todos los tickers tienen misma escala
-    # PCA/UMAP ve: formas, patrones, correlaciones, no magnitudes absolutas
-    # Ejemplo: dos activos con distinta volatilidad, pero misma dinámica -> quedan cerca
+    # Ejemplo: Si comparamos un bono que se mueve 0.1% al día con una criptomoneda que se mueve 10% al día, sin normalizar, 
+    # los algoritmos matemáticos (como PCA) ven a la criptomoneda moverse tanto que agrupan todo alrededor de ella.
+    # Al hacer el Z-Score por fila, convertimos el bono y la cripto a la misma escala. Ahora el algoritmo ya no mira cuánto se mueven, 
+    # sino la forma en que se mueven. Si ambos suben y bajan los mismos días, los agrupará juntos, ignorando que uno es más agresivo que el otro.
     X = log_returns.values.astype(float)
 
     mu = X.mean(axis=1, keepdims=True)
     sigma = X.std(axis=1, ddof=0, keepdims=True)
     sigma = np.where(sigma == 0.0, 1.0, sigma)  # evita división por cero
 
-    Xz = (X - mu) / sigma
+    Xz = (X - mu) / sigma # Normalizamos
     log_returns_z = pd.DataFrame(Xz, index=log_returns.index, columns=log_returns.columns)
 
+    # Si le das 60 meses de historia, matemáticamente eso significa que los activos viven en un espacio de 60 dimensiones. Con PCA y UMAP aplastamos esas 60 dimensiones en una sola línea (1D).
+    # Fase 1 (PCA): El Análisis de Componentes Principales es rápido y lineal. Se queda solo con los factores principales que explican el 80% (pca_var=0.80) de todo lo que pasa en la bolsa.
+    # Fase 2 (UMAP): Es un algoritmo de Inteligencia Artificial moderno y no lineal. Su trabajo es tomar esas 5-10 dimensiones limpias que dejó PCA y dejarlas en una sola dimensión (umap_dim=1), 
+    # forzando a que las empresas que tienen alta correlación acaben físicamente cerca unas de otras en ese eje 1D.
     mapper = km.KeplerMapper()
-
     projected = mapper.fit_transform(
         log_returns_z,
         projection=[
@@ -232,31 +232,15 @@ def build_clusters_from_prices(
         ]
     )
 
-    # ---------------------------------------------------------------
     # 2.4) Cover: define cómo troceamos el lens
-    # ---------------------------------------------------------------
     # n_cubes: cuántas celdas/intervalos
     # perc_overlap: cuánto se solapan
     # El solapamiento es lo que permite que un ticker aparezca en varios nodos
     # (y eso genera aristas entre nodos).
     cover = km.Cover(n_cubes=params.n_cubes, perc_overlap=params.perc_overlap)
 
-    # ---------------------------------------------------------------
-    # 2.5) Clustering local dentro de cada celda (DBSCAN)
-    # ---------------------------------------------------------------
-    # DBSCAN agrupa puntos según densidad y puede dejar "ruido" (no asignados).
-    # metric="correlation":
-    #   la distancia depende de correlación entre series de retornos,
-    #   es decir, agrupa tickers que se mueven de forma parecida (co-movimiento).
-    #
-    # eps/min_samples controlan qué tan exigente es DBSCAN.
-    #
-    # Un ticker sera "missing" si: cae en celdas donde DBSCAN lo marca cmo ruido, y
-    # no aparece como miembro de ningún nodo en ninguna celda.
     
-    # ---------------------------------------------------------------
     # 2.5) Clustering local en cada celda del cover
-    # ---------------------------------------------------------------
     # DBSCAN puede marcar puntos como ruido (-1) -> tickers "missing".
     # HACA (agglomerative) asigna todos los puntos a algún cluster.
     if params.clusterer.lower() == "dbscan":
@@ -274,15 +258,18 @@ def build_clusters_from_prices(
     else:
         raise ValueError(f"clusterer no soportado: {params.clusterer}")
 
+    # Devuelve un diccionario de Python (graph) que contiene:
+    # graph["nodes"]: Una lista de todos los micro-grupos que encontró. Por ejemplo: "El Nodo 1 tiene a Apple y Microsoft. El Nodo 2 tiene a Exxon y Chevron".
+    # graph["links"]: Si Exxon cayó en la frontera de dos cubos, el algoritmo la agrupará en un nodo del Cubo A, y también en un nodo del Cubo B. 
+    #                   Al detectar que Exxon está en ambos lados, Mapper dibuja una línea conectando el Nodo A con el Nodo B.
     graph = mapper.map(
         projected,
         log_returns_z,
         cover=cover,
         clusterer=clusterer
     )
-# ---------------------------------------------------------------
+    
     # 2.6) Extraer nodos y links del grafo de Mapper
-    # ---------------------------------------------------------------
     # graph["nodes"]: dict node_id -> lista de índices (filas) de log_returns
     # graph["links"]: dict node_id -> lista de vecinos (por solapamiento)
     nodes = graph.get("nodes", {})
@@ -299,41 +286,41 @@ def build_clusters_from_prices(
     if not nodes:
         return None
 
-    # ---------------------------------------------------------------
+    
     # 2.7) Convertir el grafo de Mapper a un grafo NetworkX
-    # ---------------------------------------------------------------
     # Esto lo hacemos para calcular "componentes conexas".
     # Componentes conexas = grupos de nodos conectados por aristas.
     #
     # Interpretación:
     #   - un grupo grande de nodos conectados implica que hay solapamientos
     #     consistentes entre clusters locales, lo que sugiere una "macro-estructura".
-    G = nx.Graph()
-    G.add_nodes_from(nodes.keys())
-    for n, nbrs in links.items():
+    G = nx.Graph() # Creamos un grafo vacio
+    G.add_nodes_from(nodes.keys()) # Añadimos todos los nodos
+    for n, nbrs in links.items(): # Vamos añadiendo las aristas entre los nodos que tienen links
         for m in nbrs:
             G.add_edge(n, m)
 
+    # Buscamos las componentes conexas en el grafo
     components = list(nx.connected_components(G))
+
+    # Guardamos en una lista los nombres reales de las acciones o sectores
+    tickers = list(log_returns.index) 
+
     if DEBUG:
         print("=== Connected components ===")
         print(f"Number of components: {len(components)}")
         print("Component sizes (nodes per component):",
-            [len(c) for c in components])
+            [len(c) for c in components]) 
 
-
-    tickers = list(log_returns.index)  # nombres de fila = tickers
-
-    # ---------------------------------------------------------------
+    
     # 2.8) Convertir componentes -> estructura anidada de tickers
     # clustered acaba siendo algo como:
     # clustered = [
     #      [["AAPL", "MSFT"], ["GOOG"]],
     #      [["TSLA"], ["AMZN", "META"]]
     # ]
-    # ---------------------------------------------------------------
     clustered: List[List[List[str]]] = []
-    for i, comp in enumerate(components):
+    for i, comp in enumerate(components): # Recorremos las componentes conexas
         if DEBUG:
             print(f"\nComponent {i} | {len(comp)} nodes")
         giant: List[List[str]] = []  # componente conexa (giant cluster)
@@ -349,6 +336,7 @@ def build_clusters_from_prices(
                 print(f"  Node {node_id}: {len(small)} tickers")
 
             # Dedupe: en un nodo podría repetirse (raro, pero mejor robustez)
+            # Si un activo entra dos veces al mismo nodo, la función de tesorería le daría el doble de dinero por error.
             seen = set()
             uniq = []
             for s in small:
@@ -367,47 +355,14 @@ def build_clusters_from_prices(
         print(f"Component {i} -> {len(giant)} small clusters")
         print("  Example clusters:", giant[:2])
 
-    # ---------------------------------------------------------------
-    # 2.9) Cobertura: asegurar que ningún ticker se pierda
-    # ---------------------------------------------------------------
-    # Según cover+DBSCAN, algunos tickers podrían no acabar en ningún nodo útil.
-    # Si los ignoras, desaparecen del reparto de pesos => sesgo.
-    #
-    # Aquí los añadimos como singletons (clusters de 1 elemento).
-    # covered = set()
-    # for giant in clustered:
-    #     for small in giant:
-    #         #update añade todo los elementos de small a covered elimando duplicados 
-    #         covered.update(small) 
-
-    # #Ahora covered tiene todos los tickers de cada small sin duplicados
-    # missing = [s for s in tickers if s not in covered]
-    # if missing: # Una lista vacía es false, una lista con al menos un elemento es true
-    #     # Se produce una lista como:
-    #     # [
-    #     #    ["AAPL"],
-    #     #    ["TSLA"],
-    #     #    ["META"]
-    #     #]
-    #     # y se añade ese bloque a clustered
-    #     clustered.append([[s] for s in missing])
     
-    # covered_post = set()
-    # for giant in clustered:
-    #     for small in giant:
-    #         covered_post.update(small)
-    
-    # missing_post = [s for s in tickers if s not in covered_post]
-
-    # ---------------------------------------------------------------
-    # 2.9) Cobertura: medir missing (DIAGNÓSTICO, no alterar clusters)
-    # ---------------------------------------------------------------
+    # 2.9) Cobertura: medir missing 
     covered = set()
     for giant in clustered:
         for small in giant:
             covered.update(small)
 
-    missing = [s for s in tickers if s not in covered]
+    missing = [s for s in tickers if s not in covered] # Para comprobar cuantos activos no incluyo DBSCAN
 
     if DEBUG:
         print("=== Coverage ===")
@@ -697,7 +652,6 @@ def cap_weights_strict(w: Dict[str, float], cap: float) -> Dict[str, float]:
 
         under = [k for k in w if k not in over]
         if not under:
-            # todos están over: forza distribución uniforme capada
             n = len(w)
             base = min(cap, 1.0 / n)
             out = {k: base for k in w}
@@ -720,60 +674,157 @@ def cap_weights_strict(w: Dict[str, float], cap: float) -> Dict[str, float]:
         w = {**w_fixed, **w_under}
 
 
+from typing import Dict, List, Optional, Set, Tuple
+import numpy as np
+import pandas as pd
+
+
 def weight_distribution_portfolio(
     clustered_symbols: List[List[List[str]]],
     max_weight: float = 0.03,
     gamma_giant: float = 1.0,
     gamma_node: float = 1.0,
-    overlap_correction: bool = True
+    overlap_correction: bool = True,
+    returns_window: Optional[pd.DataFrame] = None,
+    min_periods_score: int = 12,
 ) -> Dict[str, float]:
     """
-    Reparto robusto:
-      - giant_share ∝ (#tickers únicos en giant)^gamma_giant
-      - node_share  ∝ (#tickers únicos en nodo)^gamma_node
+    Reparto de pesos con scoring (opcional) por giant y por nodo.
+
+    Base:
+      - giant_share ∝ |G|^gamma_giant
+      - node_share  ∝ |N|^gamma_node
       - ticker_share uniforme dentro del nodo
-      - si overlap_correction: divide contribución por nº de nodos del giant donde aparece el ticker
+      - overlap_correction: divide contribución por nº de nodos del giant donde aparece el ticker
       - cap estricto opcional
+
+    Extensión (Score por Sharpe histórico, sin rf):
+      Para cualquier cluster C (giant o nodo):
+        Score(C) = mu_C / sigma_C
+      donde mu_C y sigma_C se calculan sobre el retorno equal-weight del cluster por periodo:
+        r_C(t) = mean_i r_i(t)
+
+      Giant:
+        giant_score = |giant|^gamma_giant * max(Score(giant), 0)
+
+      Nodo:
+        node_score  = |node|^gamma_node  * max(Score(node), 0)
+
+      Si returns_window es None: vuelve al esquema de tamaño puro.
+      Si con Score todo queda 0 (p.ej. Score<=0 o falta de datos): fallback a tamaño puro.
     """
     if not clustered_symbols:
         return {}
 
-    # Precompute sets + tamaños
+    # -----------------------------
+    # Helpers
+    # -----------------------------
+    def _sharpe_eqw(cols: List[str]) -> float:
+        """Sharpe por periodo (mu/sigma) del retorno equal-weight del conjunto cols."""
+        if returns_window is None or len(cols) == 0:
+            return 0.0
+        sub = returns_window[cols]
+        r = sub.mean(axis=1, skipna=True).dropna()
+        if len(r) < int(min_periods_score):
+            return 0.0
+        mu = float(r.mean())
+        sig = float(r.std(ddof=0))
+        if sig <= 0.0:
+            return 0.0
+        return mu / sig
+
+    # -----------------------------
+    # Precompute estructura
+    # -----------------------------
     giant_uniqs: List[Set[str]] = []
-    giant_sizes: List[int] = []
     membership_counts: List[Dict[str, int]] = []
+    node_sets_by_giant: List[List[Set[str]]] = []
 
     for giant in clustered_symbols:
         uniq = set()
         counts: Dict[str, int] = {}
-        for node in giant:
-            node_set = set(node)
-            uniq |= node_set
-            for s in node_set:
-                counts[s] = counts.get(s, 0) + 1
-        giant_uniqs.append(uniq)
-        giant_sizes.append(len(uniq))
-        membership_counts.append(counts)
+        node_sets: List[Set[str]] = []
 
-    # Giant shares
-    giant_scores = [((sz ** gamma_giant) if sz > 0 else 0.0) for sz in giant_sizes]
-    total_g = sum(giant_scores)
+        for node in giant:
+            ns = set(node)
+            if not ns:
+                continue
+            node_sets.append(ns)
+            uniq |= ns
+            for s in ns:
+                counts[s] = counts.get(s, 0) + 1
+
+        giant_uniqs.append(uniq)
+        membership_counts.append(counts)
+        node_sets_by_giant.append(node_sets)
+
+    # Si hay returns_window, ordena y trabaja con las columnas disponibles
+    if returns_window is not None:
+        returns_window = returns_window.sort_index()
+
+    # -----------------------------
+    # Giant scores (tamaño * calidad)
+    # -----------------------------
+    giant_scores: List[float] = []
+    for uniq in giant_uniqs:
+        sz = len(uniq)
+        if sz <= 0:
+            giant_scores.append(0.0)
+            continue
+
+        base = float(sz) ** float(gamma_giant)
+
+        if returns_window is None:
+            giant_scores.append(base)
+        else:
+            cols = [c for c in uniq if c in returns_window.columns]
+            sh = _sharpe_eqw(cols)
+            giant_scores.append(base * max(sh, 0.0))
+
+    # Fallback si todo se anula por Score<=0 / falta de datos
+    if sum(giant_scores) <= 0:
+        giant_scores = [(len(uniq) ** float(gamma_giant)) if len(uniq) > 0 else 0.0 for uniq in giant_uniqs]
+
+    total_g = float(sum(giant_scores))
     if total_g <= 0:
         return {}
 
+    # -----------------------------
+    # Asignación
+    # -----------------------------
     weights: Dict[str, float] = {}
 
-    for g_idx, giant in enumerate(clustered_symbols):
-        g_score = giant_scores[g_idx]
+    for g_idx, (giant, g_score) in enumerate(zip(clustered_symbols, giant_scores)):
         if g_score <= 0:
             continue
-        g_share = g_score / total_g
 
-        # Node scores dentro del giant
-        node_sets = [set(node) for node in giant if node]
-        node_sizes = [len(ns) for ns in node_sets]
-        node_scores = [((sz ** gamma_node) if sz > 0 else 0.0) for sz in node_sizes]
-        total_n = sum(node_scores)
+        g_share = g_score / total_g
+        node_sets = node_sets_by_giant[g_idx]
+        if not node_sets:
+            continue
+
+        # Node scores (tamaño * calidad)
+        node_scores: List[float] = []
+        for ns in node_sets:
+            nsz = len(ns)
+            if nsz <= 0:
+                node_scores.append(0.0)
+                continue
+
+            nbase = float(nsz) ** float(gamma_node)
+
+            if returns_window is None:
+                node_scores.append(nbase)
+            else:
+                cols = [c for c in ns if c in returns_window.columns]
+                nsh = _sharpe_eqw(cols)
+                node_scores.append(nbase * max(nsh, 0.0))
+
+        # Fallback si en este giant los nodos se anulan
+        if sum(node_scores) <= 0:
+            node_scores = [(len(ns) ** float(gamma_node)) if len(ns) > 0 else 0.0 for ns in node_sets]
+
+        total_n = float(sum(node_scores))
         if total_n <= 0:
             continue
 
@@ -782,25 +833,25 @@ def weight_distribution_portfolio(
         for ns, n_score in zip(node_sets, node_scores):
             if n_score <= 0 or not ns:
                 continue
-            node_share = g_share * (n_score / total_n)
 
+            node_share = g_share * (n_score / total_n)
             per = node_share / len(ns)
+
             for s in ns:
                 contrib = per
                 if overlap_correction:
                     m = max(1, counts.get(s, 1))
-                    contrib = contrib / m
+                    contrib /= m
                 weights[s] = weights.get(s, 0.0) + contrib
 
-    # Normaliza final
-    s = sum(weights.values())
+    # Normaliza
+    s = float(sum(weights.values()))
     if s <= 0:
         return {}
     weights = {k: v / s for k, v in weights.items()}
 
     # Cap estricto
-    if max_weight is not None and max_weight > 0:
+    if max_weight is not None and float(max_weight) > 0:
         weights = cap_weights_strict(weights, cap=float(max_weight))
 
     return weights
-

@@ -8,7 +8,8 @@ from tda_mapper import MapperParams, build_clusters_from_prices, weight_distribu
 # PH modules
 from tdapersistence import PHParams, compute_persistence_diagrams_from_returns
 from tdaphfeatures import ph_summary_features
-from tdaregime import RegimeController, bottleneck_distance_H1
+from tdaregime import RegimeController, bottleneck_distance_H1, compute_composite_score, TopoMovingAverage
+
 
 
 def mix_with_equal_weight(
@@ -142,6 +143,15 @@ def backtest_tda(
 
     prev_dgms = None
     diagnostics_rows = []
+    topo_ma = TopoMovingAverage(
+        alpha=0.15,
+        resolution=100,
+        num_landscapes=5,
+        w0=0.6,
+        w1=0.4,
+        dist_ema_beta=0.05
+    )
+
 
     # ============================================================
     # Loop de rebalanceos
@@ -157,9 +167,19 @@ def backtest_tda(
         # .iloc[] selecciona filas por posición numérica (no por fecha).
         # Resultado: Una ventana con lookback_days + 1 filas
         window = prices.iloc[idx - lookback_days: idx + 1]
-        panel = list(window.columns)
+        panel = list(window.columns) # tickers
+        returns_window = window.pct_change().dropna(how="all") # retornos de window
 
         # 8) Construir clústeres via Mapper (devuelve estructura anidada o None)
+        # Tomamos los n activos y construimos una nube de puntos formada por cada
+        # uno de estos activos. Cada uno de estos puntos tiene una dimension w, donde
+        # w es el tamaño de la ventana.
+        # Esto nos permite clusterizar activos para asignar pesos. El output del clustering/Mapper 
+        # se interpreta directamente: grupos de activos similares en ese periodo.
+        # Posteriormente con weight_distribution_portfolio asignamos peso por cluster.
+        #
+        # Si quisiesemos detectar estados del mercado / regímenes, definiríamos w puntos y cada uno
+        # de ellos de dimensión n, donde n es el número de activos considerados.
         clusters = build_clusters_from_prices(window, params)
 
         # 9) Convertir clústeres en pesos
@@ -169,7 +189,13 @@ def backtest_tda(
         else:
             # weights sobre tickers
             #w_tda = weight_distribution(clusters)
-            w_tda = weight_distribution_portfolio(clusters, max_weight=0.06, gamma_giant=0.5, gamma_node=0.5, overlap_correction=False)
+            w_tda = weight_distribution_portfolio(
+                clusters,
+                max_weight=None,
+                overlap_correction=True,
+                returns_window=returns_window,
+                min_periods_score=12  # en mensual: 12 = 1 año; ajusta si lookback<12
+            )
 
             # Seguridad: quedarnos solo con tickers realmente presentes en la ventana
             panel_set = set(panel)
@@ -197,9 +223,9 @@ def backtest_tda(
 
         if use_ph_control and len(panel) > 0:
             # returns_window: En vez de usar la misma ventana que mapper (750 días, unos 3 años),
-            # lo que hace que se suavize mucho los cambios, vamos a usar un año solo o medio año,
-            # para que PH actúe como "sensor de cambio reciente", mientras Mapper siga usando 
-            # una estructura de largo plazo
+            # Si usaras la misma ventana larga para ambos, el score de cambio de régimen tardaría demasiado en 
+            # reaccionar a un crash reciente. Al usar una ventana más corta para PH, detectas la "vibración" estructural 
+            # reciente antes de que el "mapa" a largo plazo se rompa.
             ph_lookback_days = round(lookback_days/3)
             ph_window = prices.iloc[idx - ph_lookback_days : idx + 1]
             returns_window = ph_window.pct_change().dropna(how="all")
@@ -208,14 +234,19 @@ def backtest_tda(
             dgms = ph_out.get("dgms", [])
             symbols_used = ph_out.get("symbols", [])
 
-            # score entre rebalanceos (solo si hay prev)
-            if prev_dgms is not None and len(dgms) > 1:
-                score_t = bottleneck_distance_H1(prev_dgms, dgms)
+            # Medimos cuánto ha cambiado la forma de la "nube" de activos desde el último rebalanceo. (solo si hay prev)
+            # Si el score es alto: Significa que la estructura de correlaciones se ha "roto" o reorganizado violentamente.
+            # if prev_dgms is not None and len(dgms) > 1:
+            #     #score_t = bottleneck_distance_H1(prev_dgms, dgms)
+            #     score_t = compute_composite_score(prev_dgms=prev_dgms, dgms=dgms)
+            if dgms and len(dgms) > 1:
+                score_t = topo_ma.update_and_score(dgms)
 
             # alpha online SIN look-ahead (threshold basado en scores pasados)
             alpha_t = regime_controller.alpha_from_score(score_t)
 
-            # actualizar historia después de usar score_t
+            # Llamamos a Llamas a update_history después de calcular el alpha. Esto garantiza Cero Look-ahead Bias. 
+            # Tomamos decisiones hoy basándonos en cuán raro es el cambio de hoy comparado con el pasado.
             regime_controller.update_history(score_t)
             prev_dgms = dgms
 
@@ -230,24 +261,19 @@ def backtest_tda(
                 **feats
             })
 
-        # Mezcla final (si no hay PH, alpha=1 => w = w_tda)
-        w = mix_with_equal_weight(w_tda, panel, alpha=alpha_t) if len(panel) > 0 else {}
-
-        # Normalización defensiva
-        tot = sum(w.values())
-        if tot <= 0 and len(panel) > 0:
-            w = {c: 1.0 / len(panel) for c in panel}
-        elif tot > 0:
-            w = {s: v / tot for s, v in w.items()}
-
         covered_by_tda = [s for s in panel if w_tda.get(s, 0.0) > 0.0]
         coverage = len(covered_by_tda) / max(1, len(panel))
 
         # Shrinkage por cobertura: si Mapper deja fuera activos, reduces confianza en w_tda
+        # Con clip restringimos a que coverage sea como minimo 0.0(si es menor coverage pasa a valer 0.0) 
+        # y como mucho 1.0(si es menor coverage pasa a valer 1.0).
         alpha_cov = float(np.clip(coverage, 0.0, 1.0))
 
         # Si NO usas PH: alpha_final = alpha_cov
         # Si usas PH: puedes combinar ambos (multiplicar) para que PH también reduzca riesgo
+        # Ej:  Si el mercado está loco (alpha_t = 0.5$) Y el modelo solo selecciona pocas acciones (alpha_cov = 0.5), 
+        # el resultado es alpha_final = 0.25.
+
         alpha_final = alpha_t * alpha_cov if use_ph_control else alpha_cov
 
         w = mix_with_equal_weight(w_tda, panel, alpha=alpha_final)

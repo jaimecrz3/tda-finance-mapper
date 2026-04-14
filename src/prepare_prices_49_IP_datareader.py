@@ -24,7 +24,13 @@ def returns_to_price_index(
         # 100 * 1.01 = 101
         # 101 * 0.98 = 98.98
         # 98.98 * 1.03 = 101.9494
-        path = (1.0 + r.loc[first:]).cumprod() * base
+        #
+        # El resultado muestra cómo crece una inversión inicial al reinvertir las ganancias diarias. 
+        # El resultado del ejemplo anterior seria [101, 98.98, 101.9494], indicando un crecimiento total del 1.9494% al final del periodo.
+        #
+        # Al tenerlo en precios (multiplicar por 100) y no en retornos, nos facilita el calculo de metricas como Max Drawdown (la peor caida) 
+        # por ejemplo, ya que podemos decir: En el año 2000 esto llegó a valer 350$, y en 2008 cayó a 150$. Calculo la caída sobre el precio
+        path = (1.0 + r.loc[first:]).cumprod() * base # Con cumprod() multiplicamos secuencialmente cada valor con los anteriores
         # Resultado: Un índice de precios equivalente a invertir base en 
         # ese activo en la primera fecha disponible.
         prices.loc[first:, c] = path
@@ -32,6 +38,9 @@ def returns_to_price_index(
     return prices
 
 def load_kf49_prices_from_returns(rets: pd.DataFrame, base: float = 100.0, require_complete_panel: bool = True):
+    # Busca en toda la tabla y elimina cualquier sector industrial (axis=1 significa columnas) que tenga al menos 
+    # un solo mes sin datos (NaN) en toda su historia. Es necesario porque los modelos matematicos no pueden trabajar
+    # con datos faltantes. Otra opcion seria imputar el dato faltante
     if require_complete_panel:
         rets = rets.dropna(axis=1, how="any")
     return returns_to_price_index(rets, base=base).sort_index()
