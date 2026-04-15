@@ -4,7 +4,6 @@ import numpy as np
 from tda_mapper import MapperParams
 from backtest import (
     backtest_tda,
-    backtest_equal_weight,
     perf_summary,
     backtest_equal_weight_rebalanced
 )
@@ -202,25 +201,21 @@ def main():
                 ph_diagnostics_csv=None
             )
 
-            # Baselines
-            eqw_full = backtest_equal_weight(sub)
+            # Baseline
             eqw_reb_full = backtest_equal_weight_rebalanced(sub, lookback_days, rebalance_days, tc_bps=5.0)
 
             # 5) Evaluación SOLO en el tramo [start, end] (quitamos warm-up de métricas)
             tda_mapper = tda_mapper_full.loc[start:end]
             tda_ph = tda_ph_full.loc[start:end]
-            eqw = eqw_full.loc[start:end]
             eqw_reb = eqw_reb_full.loc[start:end]
 
             rows.append({
                 "start": a, "end": b,
                 "tda_mapper": perf_summary(tda_mapper["port_ret"], periods_per_year=periods_per_year, rf=0.0),
                 "tda_ph": perf_summary(tda_ph["port_ret"], periods_per_year=periods_per_year, rf=0.0),
-                "eqw": perf_summary(eqw["port_ret"], periods_per_year=periods_per_year, rf=0.0),
                 "eqw_reb": perf_summary(eqw_reb["port_ret"], periods_per_year=periods_per_year, rf=0.0),
                 "final_nav_tda_mapper": float(tda_mapper["port_nav"].iloc[-1]),
                 "final_nav_tda_ph": float(tda_ph["port_nav"].iloc[-1]),
-                "final_nav_eqw": float(eqw["port_nav"].iloc[-1]),
                 "final_nav_eqw_reb": float(eqw_reb["port_nav"].iloc[-1]),
             })
 
@@ -234,10 +229,6 @@ def main():
                 "tda_ph_ann_return": rows[-1]["tda_ph"]["ann_return"],
                 "tda_ph_sharpe": rows[-1]["tda_ph"]["sharpe"],
                 "tda_ph_max_dd": rows[-1]["tda_ph"]["max_drawdown"],
-
-                "eqw_ann_return": rows[-1]["eqw"]["ann_return"],
-                "eqw_sharpe": rows[-1]["eqw"]["sharpe"],
-                "eqw_max_dd": rows[-1]["eqw"]["max_drawdown"],
 
                 "eqw_reb_ann_return": rows[-1]["eqw_reb"]["ann_return"],
                 "eqw_reb_sharpe": rows[-1]["eqw_reb"]["sharpe"],
@@ -268,16 +259,15 @@ def main():
             # SIMULAMOS LAS ESTRATEGIAS DE INVERSION (sobre el periodo completo, incluyendo el calentamiento)
             tda_mapper_full = backtest_tda(
                 sub, lookback_days, rebalance_days, params, tc_bps=5.0,
-                use_ph_control=False, periods_per_year=12
+                use_ph_control=False
             )
 
             tda_ph_full = backtest_tda(
                 sub, lookback_days, rebalance_days, params, tc_bps=5.0,
                 use_ph_control=True,
-                ph_diagnostics_csv=None, periods_per_year=12
+                ph_diagnostics_csv=None
             )
 
-            eqw_full = backtest_equal_weight(sub)
             eqw_reb_full = backtest_equal_weight_rebalanced(
                 sub, lookback_days, rebalance_days, tc_bps=5.0
             )
@@ -285,7 +275,6 @@ def main():
             # Tomamos los resultados de los backtests y quitamos el periodo de calentamiento
             tda_mapper = tda_mapper_full.loc[start:end]
             tda_ph = tda_ph_full.loc[start:end]
-            eqw = eqw_full.loc[start:end]
             eqw_reb = eqw_reb_full.loc[start:end]
 
             # COMPROBACION (luego se quitara)
@@ -306,11 +295,9 @@ def main():
                 "start": a, "end": b,
                 "tda_mapper": perf_summary(tda_mapper["port_ret"], periods_per_year=periods_per_year, rf=rf_win, market_ret=mkt_win, factors=ff3_win),
                 "tda_ph": perf_summary(tda_ph["port_ret"], periods_per_year=periods_per_year, rf=rf_win, market_ret=mkt_win, factors=ff3_win),
-                "eqw": perf_summary(eqw["port_ret"], periods_per_year=periods_per_year, rf=rf_win, market_ret=mkt_win, factors=ff3_win),
                 "eqw_reb": perf_summary(eqw_reb["port_ret"], periods_per_year=periods_per_year, rf=rf_win, market_ret=mkt_win, factors=ff3_win),
                 "final_nav_tda_mapper": float(tda_mapper["port_nav"].iloc[-1]),
                 "final_nav_tda_ph": float(tda_ph["port_nav"].iloc[-1]),
-                "final_nav_eqw": float(eqw["port_nav"].iloc[-1]),
                 "final_nav_eqw_reb": float(eqw_reb["port_nav"].iloc[-1]),
             })
 
@@ -318,7 +305,6 @@ def main():
 
             tda = last["tda_mapper"]
             ph  = last["tda_ph"]
-            eqw = last["eqw"]
             eqr = last["eqw_reb"]
 
             # Funcion para extraer los resultados del último periodo analizado (rows[-1]) para luego pasarlos a las columnas del Excel final
@@ -390,22 +376,6 @@ def main():
                 "tda_ph_ff_alpha_tstat": _g(ph, "ff_alpha_tstat"),
                 "tda_ph_ff_r2": _g(ph, "ff_r2"),
 
-                # --------- EQW ----------
-                "eqw_total_return": _g(eqw, "total_return"),
-                "eqw_ann_return_geo": _g(eqw, "ann_return_geo"),
-                "eqw_ann_return_arith": _g(eqw, "ann_return_arith"),
-                "eqw_ann_vol": _g(eqw, "ann_vol"),
-                "eqw_sharpe": _g(eqw, "sharpe"),
-                "eqw_sortino": _g(eqw, "sortino"),
-                "eqw_calmar": _g(eqw, "calmar"),
-                "eqw_hwm_return": _g(eqw, "hwm_return"),
-                "eqw_max_dd": _g(eqw, "max_drawdown"),
-                "eqw_max_dd_duration": _g(eqw, "max_drawdown_duration"),
-                "eqw_VaR_95": _g(eqw, "VaR_95"),
-                "eqw_ES_95": _g(eqw, "ES_95"),
-                "eqw_VaR_99": _g(eqw, "VaR_99"),
-                "eqw_ES_99": _g(eqw, "ES_99"),
-
                 # --------- EQW Rebalanced ----------
                 "eqw_reb_total_return": _g(eqr, "total_return"),
                 "eqw_reb_ann_return_geo": _g(eqr, "ann_return_geo"),
@@ -425,7 +395,6 @@ def main():
                 # --------- NAV finales (ya los guardabas) ----------
                 "final_nav_tda_mapper": float(last["final_nav_tda_mapper"]),
                 "final_nav_tda_ph": float(last["final_nav_tda_ph"]),
-                "final_nav_eqw": float(last["final_nav_eqw"]),
                 "final_nav_eqw_reb": float(last["final_nav_eqw_reb"]),
             })
 
@@ -437,7 +406,7 @@ def main():
         summary.to_csv("results_Nasdaq100/prueba_results_summary_mapper_vs_ph_control.csv", index=False)
     elif use_data_49_IP:
         summary.to_csv(
-            "results_49_Industry_Portfolios/results_haca_landscape_Gidea_quantie_095.csv", index=False)
+            "results_49_Industry_Portfolios/results_haca_landscape_Gidea_quantile_095.csv", index=False)
     else:
         raise ValueError("Se debe incluir un dataset")
     
