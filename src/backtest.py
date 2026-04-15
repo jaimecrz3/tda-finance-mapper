@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 
 # Mapper
-from tda_mapper import MapperParams, build_clusters_from_prices, weight_distribution, weight_distribution_portfolio
+from tda_mapper import MapperParams, build_clusters_from_prices, weight_distribution
 
 # PH modules
 from tdapersistence import PHParams, compute_persistence_diagrams_from_returns
 from tdaphfeatures import ph_summary_features
-from tdaregime import RegimeController, bottleneck_distance_H1, compute_composite_score, TopoMovingAverage
+from tdaregime import TopologicalAnomalyDetector, compute_landscape_norm
 
 
 
@@ -47,7 +47,8 @@ def backtest_tda(
     tc_bps: float = 0.0,
     use_ph_control: bool = False,
     ph_params: Optional[PHParams] = None,
-    regime_controller: Optional[RegimeController] = None,
+    # regime_controller: Optional[RegimeController] = None,
+    ph_history_len: int = 12,  # Tamaño de la ventana histórica 
     ph_diagnostics_csv: Optional[str] = None,
     periods_per_year: int = 252,
 ) -> pd.DataFrame:
@@ -110,16 +111,14 @@ def backtest_tda(
     port_ret = pd.Series(0.0, index=dates)
     turnover = pd.Series(0.0, index=dates)
 
-    # Extra: series para diagnosticar PH (se rellenan solo si use_ph_control=True)
-    regime_score = pd.Series(np.nan, index=dates)
-    alpha_series = pd.Series(np.nan, index=dates)
+    # Series para diagnosticar PH (se rellenan solo si use_ph_control=True)
+    landscape_norm = pd.Series(np.nan, index=dates)
+    market_safe_flag = pd.Series(1.0, index=dates) # 1.0 = Safe, 0.0 = Cash
 
     # 6) Pesos anteriores (para calcular turnover frente al nuevo peso)
     w_prev: Dict[str, float] = {}
 
-    # ----------------------------
     # Config PH por defecto
-    # ----------------------------
     if ph_params is None:
         ph_params = PHParams(
             maxdim=1,
@@ -128,29 +127,14 @@ def backtest_tda(
             winsor_q=0.01
         )
 
-    # Controlador de régimen calibrado a frecuencia de rebalance (no por días)
-    # reb_per_year ~ 252 / rebalance_days
-    if regime_controller is None:
-        reb_per_year = max(1.0, periods_per_year / float(rebalance_days))
-        history_len = max(10, int(round(5.0 * reb_per_year)))   # ~5 años de historia
-        min_history = max(4, int(round(2.0 * reb_per_year)))    # ~2 años mínimo
-        regime_controller = RegimeController(
-            history_len=history_len,
-            quantile=0.80,     # más estable con pocas observaciones
-            min_history=min_history,
-            min_alpha=0.25
-        )
-
-    prev_dgms = None
-    diagnostics_rows = []
-    topo_ma = TopoMovingAverage(
-        alpha=0.15,
-        resolution=100,
-        num_landscapes=5,
-        w0=0.6,
-        w1=0.4,
-        dist_ema_beta=0.05
+    # Controlador de régimen 
+    detector = TopologicalAnomalyDetector(
+        history_len=ph_history_len,
+        danger_quantile=0.95, 
+        min_history=max(3, int(ph_history_len * 0.25)) 
     )
+
+    diagnostics_rows = []
 
 
     # ============================================================
@@ -189,12 +173,9 @@ def backtest_tda(
         else:
             # weights sobre tickers
             #w_tda = weight_distribution(clusters)
-            w_tda = weight_distribution_portfolio(
+            w_tda = weight_distribution(
                 clusters,
-                max_weight=None,
-                overlap_correction=True,
-                returns_window=returns_window,
-                min_periods_score=12  # en mensual: 12 = 1 año; ajusta si lookback<12
+                max_weight=0.1
             )
 
             # Seguridad: quedarnos solo con tickers realmente presentes en la ventana
@@ -209,80 +190,52 @@ def backtest_tda(
                 w_tda = {s: v / tot for s, v in w_tda.items()}
 
         # ----------------------------
-        # PH control (opcional)
+        # PH control (NUEVO ENFOQUE: LANDSCAPE + CASH)
         # ----------------------------
-        # 1. Cada ventana define una nube de activos en R^L con L = lookback_days y una distancia(correlación)
-        # 2. PH resume esa nube en diagramas Dt
-        # 3. Se compara Dt entre rebalanceos con bottleneck -> regime_score_H1
-        # 4. Ese score controla alpha_t, que regula el shrinkage a equal-weight
-        # Resumen: La aportacion de PH es detectar cuándo es más probable que la señal de clustering 
-        # sea menos estable y aplicar shrinkage para no pagar el coste (en riegos y/o turnover) 
-        # de una estructura frágil
-        score_t = None
-        alpha_t = 1.0
+        norma_t = None
+        market_safe = True
 
         if use_ph_control and len(panel) > 0:
-            # returns_window: En vez de usar la misma ventana que mapper (750 días, unos 3 años),
-            # Si usaras la misma ventana larga para ambos, el score de cambio de régimen tardaría demasiado en 
-            # reaccionar a un crash reciente. Al usar una ventana más corta para PH, detectas la "vibración" estructural 
-            # reciente antes de que el "mapa" a largo plazo se rompa.
             ph_lookback_days = round(lookback_days/3)
             ph_window = prices.iloc[idx - ph_lookback_days : idx + 1]
-            returns_window = ph_window.pct_change().dropna(how="all")
+            ph_returns_window = ph_window.pct_change().dropna(how="all")
 
-            ph_out = compute_persistence_diagrams_from_returns(returns_window, ph_params)
+            ph_out = compute_persistence_diagrams_from_returns(ph_returns_window, ph_params)
             dgms = ph_out.get("dgms", [])
             symbols_used = ph_out.get("symbols", [])
 
-            # Medimos cuánto ha cambiado la forma de la "nube" de activos desde el último rebalanceo. (solo si hay prev)
-            # Si el score es alto: Significa que la estructura de correlaciones se ha "roto" o reorganizado violentamente.
-            # if prev_dgms is not None and len(dgms) > 1:
-            #     #score_t = bottleneck_distance_H1(prev_dgms, dgms)
-            #     score_t = compute_composite_score(prev_dgms=prev_dgms, dgms=dgms)
+            # Calculamos la norma L2 y evaluamos seguridad
             if dgms and len(dgms) > 1:
-                score_t = topo_ma.update_and_score(dgms)
+                norma_t = compute_landscape_norm(dgms, dimension=1)
+                market_safe = detector.is_market_safe(norma_t)
 
-            # alpha online SIN look-ahead (threshold basado en scores pasados)
-            alpha_t = regime_controller.alpha_from_score(score_t)
-
-            # Llamamos a Llamas a update_history después de calcular el alpha. Esto garantiza Cero Look-ahead Bias. 
-            # Tomamos decisiones hoy basándonos en cuán raro es el cambio de hoy comparado con el pasado.
-            regime_controller.update_history(score_t)
-            prev_dgms = dgms
-
-            # features para logging
             feats = ph_summary_features(dgms) if dgms else {}
             diagnostics_rows.append({
                 "rebalance_date": dates[idx],
                 "n_assets_panel": len(panel),
                 "n_assets_used_ph": len(symbols_used),
-                "regime_score_H1": score_t if score_t is not None else np.nan,
-                "alpha_t": alpha_t,
+                "landscape_norm_L2": norma_t if norma_t is not None else np.nan,
+                "market_safe": market_safe,
                 **feats
             })
 
-        covered_by_tda = [s for s in panel if w_tda.get(s, 0.0) > 0.0]
-        coverage = len(covered_by_tda) / max(1, len(panel))
+        # --- APLICACIÓN DE PESOS ---
+        if use_ph_control and not market_safe:
+            # ALARMA: El mercado se ha roto topológicamente.
+            w = {} # Cash (Sin exposición a mercado)
+            print(f"[{dates[idx].date()}] ALERTA TDA: Anomalía L2={norma_t:.2f}. Pasando a LIQUIDEZ (Cash).")
+        else:
+            # MERCADO SEGURO: Procedemos con Mapper
+            covered_by_tda = [s for s in panel if w_tda.get(s, 0.0) > 0.0]
+            coverage = len(covered_by_tda) / max(1, len(panel))
+            alpha_cov = float(np.clip(coverage, 0.0, 1.0))
 
-        # Shrinkage por cobertura: si Mapper deja fuera activos, reduces confianza en w_tda
-        # Con clip restringimos a que coverage sea como minimo 0.0(si es menor coverage pasa a valer 0.0) 
-        # y como mucho 1.0(si es menor coverage pasa a valer 1.0).
-        alpha_cov = float(np.clip(coverage, 0.0, 1.0))
+            w = mix_with_equal_weight(w_tda, panel, alpha=alpha_cov)
 
-        # Si NO usas PH: alpha_final = alpha_cov
-        # Si usas PH: puedes combinar ambos (multiplicar) para que PH también reduzca riesgo
-        # Ej:  Si el mercado está loco (alpha_t = 0.5$) Y el modelo solo selecciona pocas acciones (alpha_cov = 0.5), 
-        # el resultado es alpha_final = 0.25.
-
-        alpha_final = alpha_t * alpha_cov if use_ph_control else alpha_cov
-
-        w = mix_with_equal_weight(w_tda, panel, alpha=alpha_final)
-
-        # Diagnóstico: distancia a equal-weight
-        w_eq = {s: 1.0 / len(panel) for s in panel}
-        l1 = sum(abs(w_tda.get(s, 0.0) - w_eq[s]) for s in panel)
-        wvals = np.array([w_tda.get(s, 0.0) for s in panel])
-        print(f"[{dates[idx].date()}] L1_to_eq={l1:.6f}  min={wvals.min():.6f}  max={wvals.max():.6f}  std={wvals.std():.6f}")
+            w_eq = {s: 1.0 / len(panel) for s in panel}
+            l1 = sum(abs(w.get(s, 0.0) - w_eq[s]) for s in panel)
+            wvals = np.array([w.get(s, 0.0) for s in panel]) if w else np.array([0.0])
+            print(f"[{dates[idx].date()}] Seguro. L1_to_eq={l1:.6f}  max_weight={wvals.max():.4f}")
 
         # ============================================================
         # 10) Turnover aproximado
@@ -342,8 +295,8 @@ def backtest_tda(
 
             # rellenar diagnóstico por día (constante en el tramo)
             if use_ph_control:
-                regime_score.loc[d] = (score_t if score_t is not None else np.nan)
-                alpha_series.loc[d] = alpha_t
+                landscape_norm.loc[d] = (norma_t if norma_t is not None else np.nan)
+                market_safe_flag.loc[d] = 1.0 if market_safe else 0.0
 
         # 14) Guardamos pesos actuales como “anteriores” para el próximo rebalance
         w_prev = dict(w)
@@ -359,8 +312,8 @@ def backtest_tda(
     })
 
     if use_ph_control:
-        out["regime_score_H1"] = regime_score
-        out["alpha_t"] = alpha_series
+        out["landscape_norm_L2"] = landscape_norm
+        out["market_safe_flag"] = market_safe_flag
 
     # Guardar CSV de diagnósticos por rebalance si se pide
     if ph_diagnostics_csv is not None and len(diagnostics_rows) > 0:

@@ -437,7 +437,7 @@ def main():
         summary.to_csv("results_Nasdaq100/prueba_results_summary_mapper_vs_ph_control.csv", index=False)
     elif use_data_49_IP:
         summary.to_csv(
-            "results_49_Industry_Portfolios/results_haca_landscape_summary_mapper_vs_ph_control.csv", index=False)
+            "results_49_Industry_Portfolios/results_haca_landscape_Gidea_quantie_095.csv", index=False)
     else:
         raise ValueError("Se debe incluir un dataset")
     
