@@ -287,15 +287,13 @@ def main():
 
             # quitamos el periodo de calentamiento de los factores (RF y mercado)
             rf_win = rf.loc[start:end]
-            mkt_win = mkt.loc[start:end]
-            ff3_win = ff3.loc[start:end]
 
             # Obtenems las metricas para cada algoritmo
             rows.append({
                 "start": a, "end": b,
-                "tda_mapper": perf_summary(tda_mapper["port_ret"], periods_per_year=periods_per_year, rf=rf_win, market_ret=mkt_win, factors=ff3_win),
-                "tda_ph": perf_summary(tda_ph["port_ret"], periods_per_year=periods_per_year, rf=rf_win, market_ret=mkt_win, factors=ff3_win),
-                "eqw_reb": perf_summary(eqw_reb["port_ret"], periods_per_year=periods_per_year, rf=rf_win, market_ret=mkt_win, factors=ff3_win),
+                "tda_mapper": perf_summary(tda_mapper["port_ret"], periods_per_year=periods_per_year, rf=rf_win),
+                "tda_ph": perf_summary(tda_ph["port_ret"], periods_per_year=periods_per_year, rf=rf_win),
+                "eqw_reb": perf_summary(eqw_reb["port_ret"], periods_per_year=periods_per_year, rf=rf_win),
                 "final_nav_tda_mapper": float(tda_mapper["port_nav"].iloc[-1]),
                 "final_nav_tda_ph": float(tda_ph["port_nav"].iloc[-1]),
                 "final_nav_eqw_reb": float(eqw_reb["port_nav"].iloc[-1]),
@@ -318,79 +316,26 @@ def main():
                 # --------- TDA Mapper ----------
                 "tda_mapper_total_return": _g(tda, "total_return"),
                 "tda_mapper_ann_return_geo": _g(tda, "ann_return_geo"),
-                "tda_mapper_ann_return_arith": _g(tda, "ann_return_arith"),
-                "tda_mapper_geo_mean_period": _g(tda, "geo_mean_period"),
-                "tda_mapper_arith_mean_period": _g(tda, "arith_mean_period"),
-
                 "tda_mapper_ann_vol": _g(tda, "ann_vol"),
                 "tda_mapper_sharpe": _g(tda, "sharpe"),
                 "tda_mapper_sortino": _g(tda, "sortino"),
-                "tda_mapper_calmar": _g(tda, "calmar"),
-
-                "tda_mapper_hwm_return": _g(tda, "hwm_return"),
-                "tda_mapper_max_dd": _g(tda, "max_drawdown"),
-                "tda_mapper_max_dd_duration": _g(tda, "max_drawdown_duration"),
-
-                "tda_mapper_VaR_95": _g(tda, "VaR_95"),
-                "tda_mapper_ES_95": _g(tda, "ES_95"),
-                "tda_mapper_VaR_99": _g(tda, "VaR_99"),
-                "tda_mapper_ES_99": _g(tda, "ES_99"),
-
-                "tda_mapper_capm_alpha_ann": _g(tda, "capm_alpha_ann"),
-                "tda_mapper_capm_alpha_tstat": _g(tda, "capm_alpha_tstat"),
-                "tda_mapper_capm_beta": _g(tda, "capm_beta"),
-                "tda_mapper_capm_r2": _g(tda, "capm_r2"),
-
-                "tda_mapper_ff_alpha_ann": _g(tda, "ff_alpha_ann"),
-                "tda_mapper_ff_alpha_tstat": _g(tda, "ff_alpha_tstat"),
-                "tda_mapper_ff_r2": _g(tda, "ff_r2"),
-
-                # Con FF3 tendrás estas tres si factors contiene Mkt-RF/SMB/HML:
-                "tda_mapper_ff_beta_MktRF": _g(tda, "ff_beta_Mkt-RF"),
-                "tda_mapper_ff_tstat_MktRF": _g(tda, "ff_tstat_Mkt-RF"),
-                "tda_mapper_ff_beta_SMB": _g(tda, "ff_beta_SMB"),
-                "tda_mapper_ff_tstat_SMB": _g(tda, "ff_tstat_SMB"),
-                "tda_mapper_ff_beta_HML": _g(tda, "ff_beta_HML"),
-                "tda_mapper_ff_tstat_HML": _g(tda, "ff_tstat_HML"),
+                "tda_mapper_max_dd": _g(tda, "max_dd"),
 
                 # --------- TDA + PH ----------
                 "tda_ph_total_return": _g(ph, "total_return"),
                 "tda_ph_ann_return_geo": _g(ph, "ann_return_geo"),
-                "tda_ph_ann_return_arith": _g(ph, "ann_return_arith"),
                 "tda_ph_ann_vol": _g(ph, "ann_vol"),
                 "tda_ph_sharpe": _g(ph, "sharpe"),
                 "tda_ph_sortino": _g(ph, "sortino"),
-                "tda_ph_calmar": _g(ph, "calmar"),
-                "tda_ph_hwm_return": _g(ph, "hwm_return"),
-                "tda_ph_max_dd": _g(ph, "max_drawdown"),
-                "tda_ph_max_dd_duration": _g(ph, "max_drawdown_duration"),
-                "tda_ph_VaR_95": _g(ph, "VaR_95"),
-                "tda_ph_ES_95": _g(ph, "ES_95"),
-                "tda_ph_VaR_99": _g(ph, "VaR_99"),
-                "tda_ph_ES_99": _g(ph, "ES_99"),
-                "tda_ph_capm_alpha_ann": _g(ph, "capm_alpha_ann"),
-                "tda_ph_capm_alpha_tstat": _g(ph, "capm_alpha_tstat"),
-                "tda_ph_capm_beta": _g(ph, "capm_beta"),
-                "tda_ph_capm_r2": _g(ph, "capm_r2"),
-                "tda_ph_ff_alpha_ann": _g(ph, "ff_alpha_ann"),
-                "tda_ph_ff_alpha_tstat": _g(ph, "ff_alpha_tstat"),
-                "tda_ph_ff_r2": _g(ph, "ff_r2"),
+                "tda_ph_max_dd": _g(ph, "max_dd"),
 
                 # --------- EQW Rebalanced ----------
                 "eqw_reb_total_return": _g(eqr, "total_return"),
                 "eqw_reb_ann_return_geo": _g(eqr, "ann_return_geo"),
-                "eqw_reb_ann_return_arith": _g(eqr, "ann_return_arith"),
                 "eqw_reb_ann_vol": _g(eqr, "ann_vol"),
                 "eqw_reb_sharpe": _g(eqr, "sharpe"),
                 "eqw_reb_sortino": _g(eqr, "sortino"),
-                "eqw_reb_calmar": _g(eqr, "calmar"),
-                "eqw_reb_hwm_return": _g(eqr, "hwm_return"),
-                "eqw_reb_max_dd": _g(eqr, "max_drawdown"),
-                "eqw_reb_max_dd_duration": _g(eqr, "max_drawdown_duration"),
-                "eqw_reb_VaR_95": _g(eqr, "VaR_95"),
-                "eqw_reb_ES_95": _g(eqr, "ES_95"),
-                "eqw_reb_VaR_99": _g(eqr, "VaR_99"),
-                "eqw_reb_ES_99": _g(eqr, "ES_99"),
+                "eqw_reb_max_dd": _g(eqr, "max_dd"),
 
                 # --------- NAV finales (ya los guardabas) ----------
                 "final_nav_tda_mapper": float(last["final_nav_tda_mapper"]),
