@@ -1,0 +1,16 @@
+{
+    "dataset": "kf49",
+    "experiment_name": "cover_ncubes_12_overlap_025",
+    "lookback_months": 60,
+    "rebalance_days": 3,
+    "tc_bps": 5.0,
+    "use_ph_control": false,
+    "clusterer": "haca",
+    "pca_var": 0.8,
+    "umap_dim": 1,
+    "n_cubes": 12,
+    "perc_overlap": 0.25,
+    "haca_distance_threshold": 0.6,
+    "haca_linkage": "average",
+    "random_state": 1
+}

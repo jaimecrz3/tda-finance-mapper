@@ -1,13 +1,2 @@
-numpy
-pandas
-scikit-learn
-umap-learn
-kmapper
-networkx
-matplotlib
-pyarrow
-ripser
-persim
-pandas_datareader
-gudhi
-
+# Install the project in editable mode.
+-e .

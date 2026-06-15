@@ -1,0 +1,85 @@
+[build-system]
+requires = ["setuptools>=77.0.3", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tda-finance-mapper"
+version = "0.1.2"
+description = "Aplicación de análisis topológico de datos a carteras financieras."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  { name = "Jaime Corzo Galdó", email = "jcggranada04@gmail.com" }
+]
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = [
+  "topological-data-analysis",
+  "finance",
+  "mapper",
+  "persistent-homology",
+  "portfolio-construction",
+]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Operating System :: OS Independent",
+  "Intended Audience :: Science/Research",
+  "Topic :: Scientific/Engineering :: Information Analysis",
+]
+
+dependencies = [
+  "numpy",
+  "pandas",
+  "scikit-learn>=1.2",
+  "umap-learn",
+  "kmapper",
+  "networkx",
+  "ripser",
+  "persim",
+  "gudhi",
+  "matplotlib",
+  "pyarrow",
+  "pandas-datareader",
+]
+
+[project.optional-dependencies]
+dev = [
+  "flake8",
+  "flake8-pyproject",
+  "pyright",
+  "pytest",
+  "build",
+  "twine",
+  "sphinx",
+  "sphinx-rtd-theme",
+]
+
+[project.urls]
+Homepage = "https://github.com/jaimecrz3/tda-finance-mapper"
+Repository = "https://github.com/jaimecrz3/tda-finance-mapper"
+Documentation = "https://github.com/jaimecrz3/tda-finance-mapper"
+Issues = "https://github.com/jaimecrz3/tda-finance-mapper/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pyright]
+include = ["src"]
+typeCheckingMode = "basic"
+pythonVersion = "3.12"
+
+[tool.flake8]
+max-line-length = 119
+extend-ignore = ["E203", "W503"]
+exclude = [
+  ".git",
+  "__pycache__",
+  "build",
+  "dist",
+  ".venv",
+  "venv",
+  "env",
+  "docs/_build",
+  "*.egg-info"
+]
+

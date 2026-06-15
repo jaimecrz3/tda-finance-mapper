@@ -1,181 +1,285 @@
-# TDA in Finance: Mapper (Bachelor's Thesis)
+# TDA Finance Mapper
 
-This repository contains the code and experiments for my Bachelor's thesis on **Topological Data Analysis (TDA)** applied to **high-dimensional financial data**, with a focus on the **Mapper** algorithm (and optional extensions with persistent homology / Ball Mapper).
+`tda-finance-mapper` is a Python package developed as part of an academic project on the application of Topological Data Analysis (TDA) to financial data.
 
-## Project goal
-Build an end-to-end, reproducible pipeline to:
-- construct rolling-window representations of market data (returns, volatility, etc.),
-- apply **Mapper** to visualize and summarize market structure,
-- identify **market regimes** and transitions,
-- compare with standard baselines (e.g., PCA + clustering).
+The package provides tools to build Mapper-based portfolio strategies, compute persistent-homology regime signals and evaluate the resulting portfolios through causal backtesting.
 
-## Method overview
-1. **Data**: daily prices (indices and/or a basket of stocks).
-2. **Preprocessing**: log-returns, rolling features, scaling.
-3. **Lens (filter)**: PCA/UMAP projections or market indicators.
-4. **Cover**: overlapping intervals (n_intervals, overlap).
-5. **Local clustering**: DBSCAN or single-linkage (MST cut).
-6. **Mapper graph**: nodes = local clusters, edges = shared points.
-7. **Evaluation**: stability across parameters, regime coherence, baselines.
+## Overview
 
-## Repository structure
-src/tda/
-mapper_pipeline.py
-clustering.py
-features.py
-metrics.py
-notebooks/
-01_data_download.ipynb
-02_feature_engineering.ipynb
-03_mapper_experiments.ipynb
-data/
-processed/ # generated features
-results/
-figures/
-tables/
-tests/
+The project studies whether topological information extracted from financial return windows can be used for:
 
+1. market-structure analysis;
+2. regime detection;
+3. portfolio construction;
+4. comparison against a simple equal-weight benchmark.
 
-## Setup
-```bash
-python -m venv .venv
-source .venv/bin/activate  # macOS/Linux
-pip install -r requirements.txt
-```
-## Reproducibility
-- Random seeds are fixed where applicable.
-- Main outputs are exported to results/ (figures + CSV/JSON).
+The main implemented models are:
 
-## Data sources
-- Datasets are downloaded from public sources (e.g., Kaggle / Yahoo Finance) and are used for academic purposes only.
+- **Mapper portfolio**: assets are represented by recent return vectors, a Mapper graph is built, and the graph structure is transformed into portfolio weights.
+- **Mapper + persistent homology**: Mapper remains the main portfolio construction method, while persistent homology acts as a regime-control signal.
+- **Equal-weight benchmark**: all available assets receive the same weight and are evaluated with the same backtesting protocol.
 
 ## Disclaimer
-- This project is for academic research and does not provide investment advice. Results may be affected by non-stationarity, noise, and overfitting. Avoid look-ahead bias in all experiments.
 
-Ideas para comparar:
+This project is for academic and research purposes only. It is not financial advice, investment advice or a production trading system. The results are intended to illustrate and evaluate a methodological pipeline, not to recommend real investment decisions.
 
-1) Métricas de DBSCAN
-2) Evaluar si un método de construcción de cartera basado en Topological Data Analysis (TDA) mejora el desempeño ajustado por riesgo y/o la diversificación respecto a dos baselines estándar, manteniendo constantes:
+## Installation
 
-Universo (Top 200 constituyentes de SPY por peso, en cada fecha)
+There are two ways to install the package.
 
-Rango temporal (2020-03-01 a 2025-03-01)
+### Install from PyPI
 
-Frecuencia de rebalance (misma para todos)
+This is the recommended option if you only want to use the package.
 
-Costes (mismo modelo de comisiones/slippage)
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install tda-finance-mapper
+````
 
-Tipo de cuenta/brokerage model
+On Windows:
 
-Resolución de datos y warm-up
+```bash
+python -m venv .venv
+.venv\Scripts\activate
+pip install tda-finance-mapper
+```
 
-Variable independiente (lo único que cambia): método de asignación de pesos.
+### Install from the repository
 
-Estrategias a comparar (3 backtests controlados)
-Estrategia A — Baseline 1: Equal-weight (EW-200)
+This option is recommended if you want to reproduce the experiments, inspect the source code, modify the package or build the documentation.
 
-Definición: cada rebalance, repartir el 100% del capital equitativamente entre los 200 activos seleccionados.
+```bash
+git clone https://github.com/jaimecrz3/tda-finance-mapper.git
+cd tda-finance-mapper
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
 
-Universo: Top 200 SPY constituents
+On Windows:
 
-Pesos: 
-𝑤
-𝑖
-=
-1
-/
-200
-w
-i
-	​
+```bash
+git clone https://github.com/jaimecrz3/tda-finance-mapper.git
+cd tda-finance-mapper
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+```
 
-=1/200
+The `requirements.txt` file installs the project in editable mode with:
 
-Rebalance: cada recalibrate_days (igual que en TDA)
+```txt
+-e .
+```
 
-Propósito: baseline “simple” y muy usado; mide si TDA aporta algo más allá de diversificación trivial.
+This means that changes made in the source code are immediately available without reinstalling the package.
 
-Estrategia B — Baseline 2: Market-cap weight proxy (MCW-200 ≈ SPY)
+For development tools such as `flake8`, `pytest`, `sphinx`, `build` and `twine`, install the optional development dependencies:
 
-Definición: aproximar el comportamiento de SPY ponderando cada acción por su “peso en el ETF” en esa fecha.
+```bash
+pip install -e .[dev]
+```
 
-Universo: Top 200 SPY constituents
 
-Pesos: 
-𝑤
-𝑖
-∝
-ETF constituent weight
-𝑖
-w
-i
-	​
+## Project structure
 
-∝ETF constituent weight
-i
-	​
+```text
+tda-finance-mapper/
+├── data/
+├── docs/
+├── results_49_Industry_Portfolios/
+├── results_SP500_CRSP/
+├── scripts/
+├── src/
+│   └── tda_finance/
+│       ├── data_preprocessing/
+│       ├── experiments/
+│       ├── portfolio/
+│       └── tda/
+├── pyproject.toml
+├── requirements.txt
+├── LICENSE
+└── README.md
+```
 
-, normalizado a sumar 1
+The main package is located under `src/tda_finance`.
 
-Rebalance: cada recalibrate_days
+The `scripts/` folder contains auxiliary scripts used during data preparation. These scripts are not part of the main package API.
 
-Propósito: comparar contra un benchmark “tipo SPY” pero restringido a los mismos 200 activos (para que la comparación sea justa y “ceteris paribus”).
+## Main modules
 
-Nota metodológica: esto no replica exactamente SPY (porque SPY tiene ~500 y tú usas 200), pero es un proxy razonable y, sobre todo, controlado.
+### `tda_finance.tda.mapper_clustering`
 
-Estrategia C — Método propuesto: TDA clustering + equal cluster weights (TDA-ECW)
+Builds Mapper graphs from financial price windows and converts Mapper clusters into portfolio weights.
 
-Definición: construir clústeres de similitud (basados en correlación de retornos y el pipeline TDA) y asignar el capital de forma balanceada entre clústeres (y subclústeres), en vez de balancearlo por acción.
+### `tda_finance.tda.persistence_diagrams`
 
-Universo: Top 200 SPY constituents
+Computes correlation-based distance matrices and persistent-homology diagrams.
 
-Clustering: KeplerMapper + (PCA/UMAP) + DBSCAN (distancia por correlación)
+### `tda_finance.tda.persistence_features`
 
-Pesos:
+Extracts summary features from persistence diagrams.
 
-capital se reparte por igual entre “clusters grandes”
+### `tda_finance.tda.regime_detection`
 
-dentro de cada cluster grande, por igual entre subclusters
+Computes persistence-landscape norms and detects topological anomalies.
 
-dentro de cada subcluster, por igual entre acciones
-(o tu regla exacta weight_distribution, pero debe quedar descrita con claridad)
+### `tda_finance.portfolio.backtest_engine`
 
-Rebalance: cada recalibrate_days
+Runs causal long-only backtests, computes portfolio returns, turnover and performance metrics.
 
-Hipótesis: la asignación por clúster reduce concentración implícita (acciones altamente correlacionadas) y mejora eficiencia riesgo/retorno frente a EW y MCW.
+### `tda_finance.data_preprocessing`
 
-3) u pipeline (retornos → correlaciones/distancias → UMAP/DBSCAN/Mapper) escala mal con el número de activos:
+Contains utilities to preprocess Kenneth French 49 Industry Portfolios and S&P 500 CRSP monthly data.
 
-La matriz de correlación/distancias es de tamaño 
-𝑁
-×
-𝑁
-N×N.
+## Minimal API example
 
-Con 200: 
-200
-2
-=
-40,000
-200
-2
-=40,000 pares.
+The following example shows the basic use of the package API with a generic price matrix.
 
-Con 500: 
-500
-2
-=
-250,000
-500
-2
-=250,000 pares.
+```python
+import pandas as pd
 
-Eso es 6,25 veces más solo en pares, y en la práctica el tiempo/memoria también suben mucho.
+from tda_finance.portfolio.backtest_engine import backtest_tda, perf_summary
+from tda_finance.tda.mapper_clustering import MapperParams
 
-Algoritmos como UMAP y DBSCAN, y el propio Mapper, suelen depender fuertemente de cálculos de vecindades/distancias: con 500 se vuelve mucho más pesado y más sensible a detalles numéricos.
+prices = pd.read_csv(
+    "data/prices.csv",
+    index_col=0,
+    parse_dates=True,
+)
 
-Para un TFG, 200 es un compromiso muy habitual: suficientemente grande para que haya estructura (clusters), pero manejable para iterar, depurar y repetir backtests.
+params = MapperParams(
+    pca_var=0.80,
+    umap_dim=1,
+    n_cubes=12,
+    perc_overlap=0.25,
+    clusterer="haca",
+    haca_distance_threshold=0.6,
+    haca_linkage="average",
+    random_state=1,
+)
 
-En vez de fijar 200 arbitrariamente, define el universo por cobertura de peso del ETF, por ejemplo:
+result = backtest_tda(
+    prices=prices,
+    lookback_days=60,
+    rebalance_days=3,
+    params=params,
+    tc_bps=5.0,
+    use_ph_control=False,
+)
 
-“Selecciono el mínimo número de constituyentes que acumulan el 90% / 95% del peso del ETF”.
+metrics = perf_summary(
+    result["port_ret"],
+    periods_per_year=12,
+)
+
+print(metrics)
+```
+
+This is only a minimal usage example. The full experimental protocol is implemented in the experiment script described below.
+
+## Running the final experiments
+
+The final experiments can be run from the project root with:
+
+```bash
+python -m tda_finance.experiments.run_mapper_ph_experiments
+```
+
+The script compares:
+
+1. Mapper;
+2. Mapper with persistent-homology regime control;
+3. equal-weight benchmark.
+
+The selected dataset is configured inside the script.
+
+## Data preparation
+
+Auxiliary scripts used to prepare the S&P 500 CRSP data are located in:
+
+```text
+scripts/data_preparation/
+```
+
+Example:
+
+```bash
+python scripts/data_preparation/prepare_prices_sp500.py
+python scripts/data_preparation/make_monthly_sp500.py
+```
+
+These scripts are included to make the data preparation process more transparent, but they are not part of the main package API.
+
+## Data availability
+
+The repository does not include the raw financial datasets used in the experiments.
+
+The Kenneth French 49 Industry Portfolios and Fama-French factor files can be downloaded and prepared using the preprocessing utilities included in the package.
+
+CRSP/WRDS data are not distributed with this project due to access and licensing restrictions. Users who want to reproduce the S&P 500 experiments must obtain the corresponding data through their own WRDS/CRSP access and place the required files locally inside the `data/` folder.
+
+The `data/` folder is ignored by Git. Only a small `data/README.md` file is included to document the expected local files.
+
+## Results
+
+The complete experimental results are discussed in the accompanying TFG report.
+
+The repository also stores generated CSV outputs in:
+
+```text
+results_49_Industry_Portfolios/
+results_SP500_CRSP/
+```
+
+These files include summary metrics, diagnostic outputs and NAV curves used in the experimental analysis.
+
+## Reproducibility
+
+The experiments use fixed random seeds where stochastic methods are involved, especially in dimensionality reduction.
+
+For exact reproducibility of the Python environment used to run the experiments, a lock file can be generated with:
+
+```bash
+pip freeze > requirements-lock.txt
+```
+
+This file records the exact package versions installed in the environment. It is mainly useful for reproducing the results of the TFG, not for publishing the package to PyPI.
+
+## Development and packaging checks
+
+The following commands are useful during development. They require the optional development dependencies:
+
+```bash
+pip install -e .[dev]
+```
+
+Run style checks:
+
+```bash
+python -m flake8 src scripts
+```
+
+Run a basic import check:
+
+```bash
+python -c "from tda_finance.tda.mapper_clustering import MapperParams; print(MapperParams())"
+```
+
+Build the package locally:
+
+```bash
+python -m build
+```
+
+Check the distribution before uploading to PyPI:
+
+```bash
+python -m twine check dist/*
+```
+
+## License
+
+This project is released under the MIT License. See the `LICENSE` file for details.
+
