@@ -1,10 +1,10 @@
 # TDA Finance Mapper
 
+[![Documentation](https://img.shields.io/badge/docs-GitHub%20Pages-blue.svg)](https://jaimecrz3.github.io/tda-finance-mapper/)
+
 `tda-finance-mapper` is a Python package developed as part of an academic project on the application of Topological Data Analysis (TDA) to financial data.
 
 The package provides tools to build Mapper-based portfolio strategies, compute persistent-homology regime signals and evaluate the resulting portfolios through causal backtesting.
-
-[![Documentation](https://img.shields.io/badge/docs-GitHub%20Pages-blue.svg)](https://jaimecrz3.github.io/tda-finance-mapper/)
 
 ## Overview
 
