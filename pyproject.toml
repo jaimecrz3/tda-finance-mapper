@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tda-finance-mapper"
-version = "0.1.4"
-description = "Aplicación de análisis topológico de datos a carteras financieras."
+version = "0.1.5"
+description = "Topological Data Analysis tools applied to financial portfolios."
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [
