@@ -179,6 +179,29 @@ print(metrics)
 
 This is only a minimal usage example. The full experimental protocol is implemented in the experiment script described below.
 
+## Documentation
+
+The documentation is built with Sphinx.
+
+Online documentation is available at:
+
+```text
+https://jaimecrz3.github.io/tda-finance-mapper/
+```
+
+To build the documentation locally:
+
+```bash
+pip install -e .[dev]
+sphinx-build -b html docs/source docs/_build/html
+```
+
+Then open:
+
+```text
+docs/_build/html/index.html
+```
+
 ## Running the final experiments
 
 The final experiments can be run from the project root with:
