@@ -1,6 +1,8 @@
 # TDA Finance Mapper
 
 [![Documentation](https://img.shields.io/badge/docs-GitHub%20Pages-blue.svg)](https://jaimecrz3.github.io/tda-finance-mapper/)
+[![PyPI - Version](https://img.shields.io/pypi/v/tda-finance-mapper?color=blue)](https://pypi.org/project/tda-finance-mapper/)
+[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/tda-finance-mapper)](https://pypi.org/project/tda-finance-mapper/)
 
 `tda-finance-mapper` is a Python package developed as part of an academic project on the application of Topological Data Analysis (TDA) to financial data.
 
