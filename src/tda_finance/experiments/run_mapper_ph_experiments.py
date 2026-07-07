@@ -18,6 +18,8 @@ from typing import Dict, Literal, Tuple
 
 import pandas as pd
 
+import time
+
 from tda_finance.data_preprocessing.preprocess_kf49 import (
     load_kf49_prices_from_returns,
 )
@@ -203,6 +205,8 @@ def main() -> None:
         print("=" * 80)
 
         # Strategy 1: Mapper portfolio without PH regime control.
+        start_time = time.perf_counter()
+
         tda_mapper_full = backtest_tda(
             sub,
             lookback_days,
@@ -211,6 +215,8 @@ def main() -> None:
             tc_bps=tc_bps,
             use_ph_control=False,
         )
+
+        time_tda_mapper = time.perf_counter() - start_time
 
         diag_path = os.path.join(
             results_dir,
@@ -223,6 +229,8 @@ def main() -> None:
         # Strategy 2: Mapper portfolio with PH regime control. When the PH
         # signal flags an anomalous regime, the portfolio temporarily switches
         # to the equal-weight benchmark.
+        start_time = time.perf_counter()
+
         tda_ph_full = backtest_tda(
             sub,
             lookback_days,
@@ -234,14 +242,20 @@ def main() -> None:
             regime_action="equal_weight",
         )
 
+        time_tda_ph = time.perf_counter() - start_time
+
         # Strategy 3: equal-weight benchmark, evaluated with the same rebalance
         # frequency and transaction-cost convention.
+        start_time = time.perf_counter()
+
         eqw_reb_full = backtest_equal_weight_rebalanced(
             sub,
             lookback_days,
             rebalance_days,
             tc_bps=tc_bps,
         )
+
+        time_eqw_reb = time.perf_counter() - start_time
 
         # Remove the warm-up part before computing metrics and saving curves.
         tda_mapper = tda_mapper_full.loc[start:end]
@@ -316,6 +330,9 @@ def main() -> None:
                 "final_nav_tda_mapper": float(tda_mapper["port_nav"].iloc[-1]),
                 "final_nav_tda_ph": float(tda_ph["port_nav"].iloc[-1]),
                 "final_nav_eqw_reb": float(eqw_reb["port_nav"].iloc[-1]),
+                "runtime_tda_mapper_seconds": time_tda_mapper,
+                "runtime_tda_ph_seconds": time_tda_ph,
+                "runtime_eqw_reb_seconds": time_eqw_reb,
             }
         )
 
@@ -325,6 +342,22 @@ def main() -> None:
     print("\nSummary saved to:")
     print(output_csv)
     print(summary)
+
+    runtime_cols = [
+        "runtime_tda_mapper_seconds",
+        "runtime_tda_ph_seconds",
+        "runtime_eqw_reb_seconds",
+    ]
+
+    runtime_summary = summary[runtime_cols].agg(["mean", "sum"]).T
+    runtime_summary.columns = ["mean_seconds_per_period", "total_seconds"]
+
+    runtime_output_csv = output_csv.replace(".csv", "_runtime_summary.csv")
+    runtime_summary.to_csv(runtime_output_csv)
+
+    print("\nRuntime summary saved to:")
+    print(runtime_output_csv)
+    print(runtime_summary)
 
 
 if __name__ == "__main__":

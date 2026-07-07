@@ -146,31 +146,13 @@ def backtest_tda(
         if len(panel) == 0:
             continue
 
-        clusters = build_clusters_from_prices(window, params)
-
-        # If Mapper cannot produce a valid graph, the strategy falls back to an
-        # equal-weight portfolio over the available panel.
-        if not clusters:
-            mapper_weights = _equal_weight(panel)
-        else:
-            mapper_weights = weight_distribution(
-                clusters,
-                max_weight=0.1,
-                method=weight_method,
-            )
-            mapper_weights = _filter_and_normalize_weights(
-                mapper_weights,
-                valid_assets=panel,
-            )
-
-            if not mapper_weights:
-                mapper_weights = _equal_weight(panel)
-
         norm_t: Optional[float] = None
         market_safe = True
+        ph_alert = False
 
-        # PH control uses a shorter recent window. Mapper builds the portfolio,
-        # while PH only decides whether the current regime looks anomalous.
+        # PH control is evaluated before Mapper. If the regime is flagged as
+        # anomalous and the selected action is cash or equal-weight, the
+        # strategy can avoid building the Mapper graph for that rebalance.
         if use_ph_control and len(panel) > 0:
             ph_lookback_days = round(lookback_days / 3)
             ph_window_raw = prices.iloc[idx - ph_lookback_days: idx + 1]
@@ -190,6 +172,7 @@ def backtest_tda(
                 norm_t = compute_landscape_norm(dgms, dimension=1)
                 market_safe = detector.is_market_safe(norm_t)
 
+            ph_alert = not market_safe
             features = ph_summary_features(dgms) if dgms else {}
 
             diagnostics_rows.append(
@@ -199,13 +182,15 @@ def backtest_tda(
                     "n_assets_used_ph": len(symbols_used),
                     "landscape_norm_L2": norm_t if norm_t is not None else np.nan,
                     "market_safe": market_safe,
+                    "ph_alert": ph_alert,
                     **features,
                 }
             )
 
-        # If PH flags an anomalous regime, replace the Mapper weights according
-        # to the selected defensive action.
+        # If PH flags an anomalous regime, use the selected defensive action
+        # directly and skip Mapper for this rebalance.
         if use_ph_control and not market_safe:
+
             if regime_action == "cash":
                 weights: Dict[str, float] = {}
 
@@ -220,11 +205,32 @@ def backtest_tda(
             if verbose:
                 print(
                     f"[{dates[idx].date()}] PH alert. "
-                    f"norm={norm_t}. Action={regime_action}."
+                    f"norm={norm_t}. Action={regime_action}. "
+                    "Mapper skipped."
                 )
 
         else:
-            weights = mapper_weights
+            # Mapper is only built when there is no PH alert, or when PH control
+            # is not active.
+            clusters = build_clusters_from_prices(window, params)
+
+            # If Mapper cannot produce a valid graph, the strategy falls back to
+            # an equal-weight portfolio over the available panel.
+            if not clusters:
+                weights = _equal_weight(panel)
+            else:
+                weights = weight_distribution(
+                    clusters,
+                    max_weight=0.1,
+                    method=weight_method,
+                )
+                weights = _filter_and_normalize_weights(
+                    weights,
+                    valid_assets=panel,
+                )
+
+                if not weights:
+                    weights = _equal_weight(panel)
 
             if verbose:
                 eq_weights = _equal_weight(panel)
@@ -234,7 +240,7 @@ def backtest_tda(
                 )
                 max_weight = max(weights.values()) if weights else 0.0
                 print(
-                    f"[{dates[idx].date()}] Safe regime. "
+                    f"[{dates[idx].date()}] Mapper used. "
                     f"L1_to_equal_weight={l1_distance:.6f}, "
                     f"max_weight={max_weight:.4f}."
                 )
